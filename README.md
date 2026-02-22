@@ -113,17 +113,28 @@ The 4 antenna patches (gold squares) must be positioned at the **top** of the en
 
 After pairing your sensor, you need to add the external converter to Zigbee2MQTT for full functionality.
 
-Copy `zigbee2mqtt/external_converters/shs01_enhanced.js` from this repository to your Zigbee2MQTT external converters folder:
+### Which converter file to use
+
+| File | Z2M Version | Module Format |
+|------|-------------|---------------|
+| `shs01_enhanced.mjs` | **2.0+** (recommended) | ES Module |
+| `shs01_enhanced.js` | **1.x** (legacy) | CommonJS |
+
+> **Note:** Zigbee2MQTT 2.0+ requires `.mjs` (ES Module) converters. If your device shows as `"NOT supported"` or the converter file gets renamed to `.invalid`, you need the `.mjs` version.
+
+Download the correct converter from the [Releases page](https://github.com/notownblues/SHS-Z2M-Presence/releases) and copy it to your Zigbee2MQTT external converters folder:
 
 **For Home Assistant Add-on:**
 ```
-/homeassistant/zigbee2mqtt/external_converters/shs01_enhanced.js
+/homeassistant/zigbee2mqtt/external_converters/
 ```
 
 **For Docker/Standalone:**
 ```
-/opt/zigbee2mqtt/data/external_converters/shs01_enhanced.js
+/opt/zigbee2mqtt/data/external_converters/
 ```
+
+> **Important:** Only place **one** converter file in the directory (either `.mjs` or `.js`, not both). Remove any old converter files or `.invalid` copies for this device.
 
 Restart Zigbee2MQTT for the changes to take effect. Your device should now expose all available entities.
 
