@@ -36,7 +36,7 @@ I wanted to thank both **u/otherworld-dev** and **Rune** from [runesblog.com](ht
 
 After discovering this project on r/homeassistant, u/otherworld-dev designed a custom PCB that integrates the ESP32-C6, LD2410C, and LD2450 into a single clean board — no breadboard or loose wiring required.
 
-> ⚠️ **The PCB is only compatible with the ESP32-C6-DevKitC-1-N8.** Other ESP32-C6 boards will not work as the pins won't align properly with the PCB.
+> ⚠️ **The PCB is only compatible with the [ESP32-C6-DevKitC-1-N8](https://eu.mouser.com/ProductDetail/Espressif-Systems/ESP32-C6-DevKitC-1-N8).** Other ESP32-C6 boards will not work as the pins won't align properly with the PCB.
 
 | | |
 |---|---|
