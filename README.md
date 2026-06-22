@@ -2,7 +2,7 @@
 
 **Dual mmWave Presence Sensor Firmware for ESP32-C6 with Zigbee2MQTT Support**
 
-![SHS-Z2M-Presence Sensor](docs/sensor.jpg)
+![SHS-Z2M-Presence](docs/SHS_case3.webp)
 
 ---
 
@@ -28,6 +28,33 @@ For the best experience, install the **SHS Z2M Presence Zone Configurator** add-
 
 ---
 
+## Community
+
+I wanted to thank both **u/otherworld-dev** and **Rune** from [runesblog.com](https://runesblog.com) for their amazing contributions to this project. It's been incredible to see people work together on this, and also the support this project has received from the community.
+
+### Custom PCB — by u/otherworld-dev
+
+After discovering this project on r/homeassistant, u/otherworld-dev designed a custom PCB that integrates the ESP32-C6, LD2410C, and LD2450 into a single clean board — no breadboard or loose wiring required.
+
+| | |
+|---|---|
+| ![PCB Front](docs/SHS_PCB_front.JPG) | ![PCB Back](docs/SHS_PCB_%20back.JPG) |
+
+**[Order the PCB on PCBWay →](https://www.pcbway.com/project/shareproject/SHS_Z2M_Presence_ESP_32_439c9c21.html)**
+
+### 3D Printed Case — by Rune (runesblog.com)
+
+I came across [Rune's work](https://www.facebook.com/groups/HomeAssistant/permalink/4289785924626078/) in the Home Assistant Facebook group a few months back — he'd been designing enclosures for ESP boards. I reached out, and he was kind enough to design a case specifically for this project. More at [runesblog.com](https://runesblog.com).
+
+| | |
+|---|---|
+| ![Case parts](docs/SHS_case1.webp) | ![Case assembly](docs/SHS_case2.webp) |
+| ![Case installed](docs/SHS_case3.webp) | ![Case in room](docs/SHS_case4.webp) |
+
+**[Download the 3D model on MakerWorld →](https://makerworld.com/en/models/2959145-shs-z2m-presence-adjustable-case-mount#profileId-3316652)**
+
+---
+
 ## Hardware Requirements
 
 | Component | Purpose |
@@ -38,17 +65,35 @@ For the best experience, install the **SHS Z2M Presence Zone Configurator** add-
 
 ---
 
-## Wiring
+## Hardware Setup
+
+Choose the setup option that best matches your situation:
+
+### Option 1: Custom PCB
+
+The easiest path. The [community-designed PCB](#custom-pcb--by-uotherworld-dev) integrates all components on a single board — flash the firmware and pair the device, no wiring needed.
+
+**[Order on PCBWay →](https://www.pcbway.com/project/shareproject/SHS_Z2M_Presence_ESP_32_439c9c21.html)**
+
+### Option 2: 3D Printed Case
+
+Pair the custom PCB with Rune's adjustable ceiling mount case for a clean, finished install.
+
+**[Download on MakerWorld →](https://makerworld.com/en/models/2959145-shs-z2m-presence-adjustable-case-mount#profileId-3316652)**
+
+### Option 3: Standard ESP32-C6 Wiring
+
+For a DIY build on a bare ESP32-C6 development board.
 
 ![ESP32-C6 Wiring Diagram](docs/esp32-c6-wiring.webp)
 
-### LD2410C
+#### LD2410C
 - TX (LD2410C) → GPIO4 (RX1) on ESP32-C6
 - RX (LD2410C) → GPIO5 (TX1) on ESP32-C6
 - VCC → 5V
 - GND → GND
 
-### LD2450
+#### LD2450
 - TX (LD2450) → GPIO19 (RX0) on ESP32-C6
 - RX (LD2450) → GPIO18 (TX0) on ESP32-C6
 - VCC → 5V
