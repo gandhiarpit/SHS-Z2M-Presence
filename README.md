@@ -36,6 +36,8 @@ I wanted to thank both **u/otherworld-dev** and **Rune** from [runesblog.com](ht
 
 After discovering this project on r/homeassistant, u/otherworld-dev designed a custom PCB that integrates the ESP32-C6, LD2410C, and LD2450 into a single clean board — no breadboard or loose wiring required.
 
+> ⚠️ **The PCB is only compatible with the ESP32-C6-DevKitC-1-N8.** Other ESP32-C6 boards will not work as the pins won't align properly with the PCB.
+
 | | |
 |---|---|
 | ![PCB Front](docs/SHS_PCB_front.JPG) | ![PCB Back](docs/SHS_PCB_%20back.JPG) |
@@ -44,7 +46,7 @@ After discovering this project on r/homeassistant, u/otherworld-dev designed a c
 
 ### 3D Printed Case — by Rune (runesblog.com)
 
-I came across [Rune's work](https://www.facebook.com/groups/HomeAssistant/permalink/4289785924626078/) in the Home Assistant Facebook group a few months back — he'd been designing enclosures for ESP boards. I reached out, and he was kind enough to design a case specifically for this project. More at [runesblog.com](https://runesblog.com).
+I came across [Rune's work](https://www.facebook.com/groups/HomeAssistant/permalink/4289785924626078/) in the Home Assistant Facebook group a few months back. He'd been designing enclosures for ESP boards which I loved. I reached out, and he was kind enough to design a case specifically for this project. Please make sure to check his work at [runesblog.com](https://runesblog.com).
 
 | | |
 |---|---|
