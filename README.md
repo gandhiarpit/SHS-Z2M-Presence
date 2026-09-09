@@ -82,6 +82,7 @@ The easiest path. The [community-designed PCB](#custom-pcb--by-uotherworld-dev) 
 Pair the custom PCB with Rune's adjustable ceiling mount case for a clean, finished install.
 
 **[Download on MakerWorld →](https://makerworld.com/en/models/2959145-shs-z2m-presence-adjustable-case-mount#profileId-3316652)**
+**[Flat one on Printables](https://www.printables.com/model/1623562-case-for-shs-z2m-presence)**
 
 ### Option 3: Standard ESP32-C6 Wiring
 
