@@ -1,0 +1,68 @@
+name: Build firmware
+
+# Builds the ESP32-C6 firmware and produces a single-file flash image
+# (bootloader + partition table + app), the same packaging as the
+# SHS_Z2M_Presence_<version>_merged.bin asset on the upstream releases.
+#
+# - every push / PR / manual run -> merged bin as a downloadable artifact
+# - pushing a v* tag            -> merged bin attached to the GitHub release
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed only by the release step
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ESP-IDF version is pinned to the one the committed sdkconfig was
+      # generated with (see the header line of sdkconfig).
+      - name: Build and merge
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.2
+          target: esp32c6
+          command: idf.py build && (idf.py merge-bin || esptool.py --chip esp32c6 merge_bin --format raw -o build/merged-binary.bin --flash-size 2MB 0x0 build/bootloader/bootloader.bin 0x8000 build/partition_table/partition-table.bin 0x10000 build/SHS_Z2M_Presence.bin)
+
+      - name: Name the artifacts
+        id: name
+        run: |
+          set -euo pipefail
+          # Firmware version comes from the string the device reports over Zigbee,
+          # so the file name always matches SHS_BASIC_SW_BUILD_ID.
+          VER="$(grep -oP 'SHS_BASIC_SW_BUILD_ID\s+"\K[^"]+' main/shs01.h)"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            NAME="SHS_Z2M_Presence_${GITHUB_REF_NAME}_merged.bin"
+          else
+            NAME="SHS_Z2M_Presence_${VER}_${GITHUB_SHA::7}_merged.bin"
+          fi
+          mkdir -p dist
+          cp build/merged-binary.bin "dist/${NAME}"
+          cp build/bootloader/bootloader.bin dist/
+          cp build/partition_table/partition-table.bin dist/
+          cp build/SHS_Z2M_Presence.bin dist/
+          cp zigbee2mqtt/external_converters/shs01_enhanced.js dist/
+          cp zigbee2mqtt/external_converters/shs01_enhanced.mjs dist/
+          echo "merged=${NAME}" >> "$GITHUB_OUTPUT"
+          ls -l dist/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.name.outputs.merged }}
+          path: dist/
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
