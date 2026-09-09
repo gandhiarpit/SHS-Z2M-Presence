@@ -75,8 +75,8 @@
 /* Optional Basic metadata */
 /* ZCL character strings: leading byte is the length. Kept as two adjacent
  * literals because a hex escape swallows any hex digits that follow it -
- * "\x0a2025-12-12" would parse as one out-of-range escape, not \n + "2025...". */
-#define SHS_BASIC_DATE_CODE             "\x0a" "2025-12-12"
+ * "\x0a2026-09-09" would parse as one out-of-range escape, not \n + "2026...". */
+#define SHS_BASIC_DATE_CODE             "\x0a" "2026-09-09"
 #define SHS_BASIC_SW_BUILD_ID           "\x06" "v1.0.5"
 
 /* ============================================================================
