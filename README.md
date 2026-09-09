@@ -106,11 +106,19 @@ For a DIY build on a bare ESP32-C6 development board.
 > **Note:** Some ESP32-C6 boards have 2 x 5V pins and some have one. Both sensors can share the same 5V pin or use separate ones if available.
 
 #### BH1750 (optional ambient light sensor)
-- SDA (BH1750) → GPIO6 on ESP32-C6
-- SCL (BH1750) → GPIO7 on ESP32-C6
-- ADDR → GND (I2C address 0x23)
-- VCC → **3V3** (not 5V — see note below)
-- GND → GND
+
+| BH1750 pin | ESP32-C6 pin | Notes |
+|------------|--------------|-------|
+| VCC | **3V3** | Not the 5V rail the radars use — see the note below |
+| GND | GND | |
+| SDA | GPIO6 | I2C data |
+| SCL | GPIO7 | I2C clock |
+| ADDR | GND | Selects address `0x23`, which the firmware expects. GY-302/GY-30 breakouts already pull this low, so it can be left unconnected on those. Tied high the module answers on `0x5C` and will not be found. |
+
+The firmware drives I2C at 100 kHz with the ESP32-C6's internal pull-ups enabled, so
+no external pull-up resistors are needed for the short leads inside a case (breakout
+boards carry their own anyway). Pins are set in `components/bh1750/include/bh1750.h`
+if you need to move them.
 
 > **Note:** The BH1750 die runs at 2.4–3.6 V. GY-302/GY-30 breakout boards include a
 > regulator and tolerate 5 V, but a bare module does not — use the 3V3 pin. The sensor
