@@ -2473,7 +2473,14 @@ static void shs_zigbee_task(void *pvParameters) {
         esp_zb_on_off_cluster_cfg_t on_off_cfg = {.on_off = ESP_ZB_ZCL_ON_OFF_ON_OFF_DEFAULT_VALUE};
         esp_zb_attribute_list_t *onoff = esp_zb_on_off_cluster_create(&on_off_cfg);
 
-        esp_zb_cluster_list_add_basic_cluster(cl, esp_zb_basic_cluster_create(NULL), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+        /* DateCode and SWBuildID are optional Basic attributes that esp_zb_basic_cluster_create()
+         * does not create, so they have to be registered here - without this the runtime
+         * set in shs_basic_publish_metadata_ep1() has no attribute to write to and the
+         * firmware version never reaches Zigbee2MQTT. */
+        esp_zb_attribute_list_t *basic_ep1 = esp_zb_basic_cluster_create(NULL);
+        esp_zb_basic_cluster_add_attr(basic_ep1, ESP_ZB_ZCL_ATTR_BASIC_DATE_CODE_ID, (void *)SHS_BASIC_DATE_CODE);
+        esp_zb_basic_cluster_add_attr(basic_ep1, ESP_ZB_ZCL_ATTR_BASIC_SW_BUILD_ID, (void *)SHS_BASIC_SW_BUILD_ID);
+        esp_zb_cluster_list_add_basic_cluster(cl, basic_ep1, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
         esp_zb_cluster_list_add_identify_cluster(cl, esp_zb_identify_cluster_create(NULL), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
         esp_zb_cluster_list_add_on_off_cluster(cl, onoff, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 

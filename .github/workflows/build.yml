@@ -38,7 +38,9 @@ jobs:
           set -euo pipefail
           # Firmware version comes from the string the device reports over Zigbee,
           # so the file name always matches SHS_BASIC_SW_BUILD_ID.
-          VER="$(grep -oP 'SHS_BASIC_SW_BUILD_ID\s+"\K[^"]+' main/shs01.h)"
+          # The version string carries a ZCL length-prefix byte in its own
+          # literal, so match the vN.N.N token rather than the first quoted one.
+          VER="$(grep -oP 'SHS_BASIC_SW_BUILD_ID.*"\Kv[0-9][^"]*' main/shs01.h)"
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             NAME="SHS_Z2M_Presence_${GITHUB_REF_NAME}_merged.bin"
           else
