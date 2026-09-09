@@ -29,6 +29,7 @@
 #include "shs01.h"
 #include "ld2410_enhanced.h"
 #include "ld2450.h"
+#include "bh1750.h"
 #include "ha/esp_zigbee_ha_standard.h"
 #include "zcl_utility.h"
 #include "light_driver.h"
@@ -867,6 +868,77 @@ static bool shs_zb_report_binary_attr(uint8_t endpoint) {
         .manuf_specific = 0,
         .manuf_code = 0,
         .attributeID = SHS_ATTR_PRESENT_VALUE_BINARY,
+    };
+
+    SHS_ZB_LOCK_ACQUIRE_OR_RETURN_FALSE();
+    esp_zb_zcl_report_attr_cmd_req(&cmd);
+    shs_last_successful_tx = (uint32_t)(esp_timer_get_time() / 1000);
+    shs_tx_success_count++;
+    esp_zb_lock_release();
+    return true;
+}
+
+
+/* ============================================================================
+ * BH1750 AMBIENT LIGHT (EP26, msIlluminanceMeasurement)
+ * ============================================================================ */
+
+#define SHS_LUX_POLL_INTERVAL_MS   10000    /* Poll the BH1750 every 10s */
+#define SHS_LUX_RETRY_INTERVAL_MS  30000    /* Re-probe this often while absent */
+#define SHS_LUX_REPORT_CHANGE      500      /* ZCL units (~12% change in lux) */
+#define SHS_LUX_REPORT_MAX_MS      300000   /* Heartbeat report every 5 min */
+
+/* ZCL illuminance is logarithmic: measuredValue = 10000*log10(lux)+1.
+ * 0 means "below the sensor's range", 0xFFFF means "invalid/unavailable". */
+static uint16_t shs_illuminance_zcl = 0;
+static uint16_t shs_last_reported_lux_zcl = 0xFFFF;  /* force the first report */
+
+static uint16_t shs_lux_to_zcl(float lux) {
+    if (lux <= 0.0f) {
+        return 0;  /* darkness - ZCL "too low to measure" */
+    }
+    float v = 10000.0f * log10f(lux) + 1.0f;
+    if (v < 1.0f)     v = 1.0f;
+    if (v > 65534.0f) v = 65534.0f;  /* 0xFFFF is reserved for "invalid" */
+    return (uint16_t)(v + 0.5f);
+}
+
+/* Set illuminance measuredValue on EP26.
+ * Returns true if successful, false if Zigbee not ready or lock failed */
+static bool shs_zb_set_illuminance(uint16_t zcl_value) {
+    if (!shs_zb_ready) return false;
+
+    SHS_ZB_LOCK_ACQUIRE_OR_RETURN_FALSE();
+    esp_zb_zcl_set_attribute_val(
+        SHS_EP_ILLUMINANCE,
+        SHS_CLUSTER_ILLUMINANCE,
+        ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+        SHS_ATTR_ILLUM_MEASURED_VALUE,
+        &zcl_value,
+        false  /* Don't rely on auto-report, use explicit report instead */
+    );
+    esp_zb_lock_release();
+    return true;
+}
+
+/* Explicit illuminance attribute report sender
+ * Returns true if successful, false if Zigbee not ready or lock failed */
+static bool shs_zb_report_illuminance(void) {
+    if (!shs_zb_ready) return false;
+
+    esp_zb_zcl_report_attr_cmd_t cmd = {
+        .zcl_basic_cmd = {
+            .src_endpoint = SHS_EP_ILLUMINANCE,
+            .dst_endpoint = 1,
+            .dst_addr_u.addr_short = 0x0000,
+        },
+        .address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT,
+        .clusterID = SHS_CLUSTER_ILLUMINANCE,
+        .direction = ESP_ZB_ZCL_CMD_DIRECTION_TO_CLI,
+        .dis_default_resp = 1,
+        .manuf_specific = 0,
+        .manuf_code = 0,
+        .attributeID = SHS_ATTR_ILLUM_MEASURED_VALUE,
     };
 
     SHS_ZB_LOCK_ACQUIRE_OR_RETURN_FALSE();
@@ -2160,6 +2232,70 @@ static void shs_ld2450_task(void *pvParameters) {
 }
 
 /* ============================================================================
+ * BH1750 AMBIENT LIGHT TASK
+ * ============================================================================ */
+
+static void shs_bh1750_task(void *pvParameters) {
+    ESP_LOGI(SHS_TAG, "BH1750 processing task started");
+
+    /* Let the Zigbee stack settle before touching the I2C bus */
+    vTaskDelay(pdMS_TO_TICKS(1000));
+
+    bool inited = (bh1750_init() == ESP_OK);
+    if (!inited) {
+        ESP_LOGW(SHS_TAG, "BH1750 not found on SDA=GPIO%d SCL=GPIO%d - retrying every %d ms",
+                 (int)BH1750_SDA_GPIO, (int)BH1750_SCL_GPIO, SHS_LUX_RETRY_INTERVAL_MS);
+    }
+
+    uint32_t last_report_ms = 0;
+
+    while (1) {
+        /* Sensor absent or wedged: re-probe periodically so wiring it up later
+         * (or a transient bus fault) does not need a reboot. */
+        if (!inited) {
+            vTaskDelay(pdMS_TO_TICKS(SHS_LUX_RETRY_INTERVAL_MS));
+            inited = (bh1750_init() == ESP_OK);
+            if (inited) {
+                ESP_LOGI(SHS_TAG, "BH1750 detected - illuminance reporting active");
+            }
+            continue;
+        }
+
+        float lux = 0.0f;
+        esp_err_t rc = bh1750_read_lux(&lux);
+        if (rc != ESP_OK) {
+            ESP_LOGW(SHS_TAG, "BH1750 read failed: %s", esp_err_to_name(rc));
+            inited = false;
+            continue;
+        }
+
+        shs_illuminance_zcl = shs_lux_to_zcl(lux);
+
+        uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+        int32_t delta = (int32_t)shs_illuminance_zcl - (int32_t)shs_last_reported_lux_zcl;
+        if (delta < 0) delta = -delta;
+
+        bool first_report = (shs_last_reported_lux_zcl == 0xFFFF);
+        bool changed      = first_report || (delta >= SHS_LUX_REPORT_CHANGE);
+        bool heartbeat    = (now - last_report_ms) >= SHS_LUX_REPORT_MAX_MS;
+
+        if (shs_zb_ready && shs_zb_connected && !shs_zb_rejoin_pending && (changed || heartbeat)) {
+            if (shs_zb_set_illuminance(shs_illuminance_zcl) && shs_zb_report_illuminance()) {
+                shs_last_reported_lux_zcl = shs_illuminance_zcl;
+                last_report_ms = now;
+                ESP_LOGI(SHS_TAG, "Illuminance reported: %.1f lux (zcl=%u)",
+                         lux, (unsigned)shs_illuminance_zcl);
+            }
+        } else {
+            ESP_LOGD(SHS_TAG, "Illuminance: %.1f lux (zcl=%u, not reported)",
+                     lux, (unsigned)shs_illuminance_zcl);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(SHS_LUX_POLL_INTERVAL_MS));
+    }
+}
+
+/* ============================================================================
  * ZIGBEE SIGNAL HANDLER
  * ============================================================================ */
 
@@ -2941,6 +3077,35 @@ static void shs_zigbee_task(void *pvParameters) {
         esp_zcl_utility_add_ep_basic_manufacturer_info(dev_ep_list, SHS_EP_ZONE5_TARGETS, &info);
     }
 
+    /* ========== EP26: BH1750 Illuminance (msIlluminanceMeasurement) ========== */
+    {
+        esp_zb_cluster_list_t *cl = esp_zb_zcl_cluster_list_create();
+
+        /* Basic cluster */
+        esp_zb_attribute_list_t *basic = esp_zb_basic_cluster_create(NULL);
+        esp_zb_cluster_list_add_basic_cluster(cl, basic, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+
+        /* Illuminance Measurement: measuredValue = 10000*log10(lux)+1.
+         * Advertise 0xFFFF ("invalid") until the BH1750 delivers a reading, so a
+         * board built without the light sensor reports nothing rather than 0 lux. */
+        esp_zb_illuminance_meas_cluster_cfg_t illum_cfg = {
+            .measured_value = 0xFFFF,
+            .min_value = 1,
+            .max_value = 0xFFFE,
+        };
+        esp_zb_attribute_list_t *illum = esp_zb_illuminance_meas_cluster_create(&illum_cfg);
+        esp_zb_cluster_list_add_illuminance_meas_cluster(cl, illum, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+
+        esp_zb_endpoint_config_t ep_cfg = {
+            .endpoint = SHS_EP_ILLUMINANCE,
+            .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
+            .app_device_id = ESP_ZB_HA_SIMPLE_SENSOR_DEVICE_ID,
+            .app_device_version = 0
+        };
+        esp_zb_ep_list_add_ep(dev_ep_list, cl, ep_cfg);
+        esp_zcl_utility_add_ep_basic_manufacturer_info(dev_ep_list, SHS_EP_ILLUMINANCE, &info);
+    }
+
     /* Register device and start */
     esp_zb_device_register(dev_ep_list);
     esp_zb_core_action_handler_register(shs_zb_action_handler);
@@ -3065,6 +3230,7 @@ void app_main(void) {
     xTaskCreate(shs_ld2410_task, "shs_ld2410_task", 4096, NULL, 4, NULL);
     xTaskCreate(shs_ld2450_task, "shs_ld2450_task", 4096, NULL, 4, NULL);
     xTaskCreate(shs_boot_button_task, "shs_boot_button", 8192, NULL, 4, NULL);
+    xTaskCreate(shs_bh1750_task, "shs_bh1750_task", 3072, NULL, 4, NULL);
 
     ESP_LOGI(SHS_TAG, "SHS01 firmware started - Position reporting via Zigbee (enable in Z2M)");
 }

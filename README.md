@@ -64,6 +64,7 @@ I came across [Rune's work](https://www.facebook.com/groups/HomeAssistant/permal
 | ESP32-C6 | Zigbee-enabled microcontroller |
 | LD2410C | Presence detection (moving/static) |
 | LD2450 | Multi-target position tracking & zones |
+| BH1750 | Ambient light measurement (lux) — optional |
 
 ---
 
@@ -103,6 +104,25 @@ For a DIY build on a bare ESP32-C6 development board.
 - GND → GND
 
 > **Note:** Some ESP32-C6 boards have 2 x 5V pins and some have one. Both sensors can share the same 5V pin or use separate ones if available.
+
+#### BH1750 (optional ambient light sensor)
+- SDA (BH1750) → GPIO6 on ESP32-C6
+- SCL (BH1750) → GPIO7 on ESP32-C6
+- ADDR → GND (I2C address 0x23)
+- VCC → **3V3** (not 5V — see note below)
+- GND → GND
+
+> **Note:** The BH1750 die runs at 2.4–3.6 V. GY-302/GY-30 breakout boards include a
+> regulator and tolerate 5 V, but a bare module does not — use the 3V3 pin. The sensor
+> is entirely optional: if it is not fitted the firmware logs a warning, retries every
+> 30 s, and the `illuminance` entity simply stays empty.
+
+#### LD2410B instead of LD2410C
+The LD2410, LD2410B and LD2410C all speak the same Hi-Link serial protocol at 256000
+baud, so the firmware runs on any of them with no changes — wire it to GPIO4/GPIO5 as
+above. Two caveats: the community PCB is cut for the LD2410C footprint so a B needs
+DIY wiring, and the B's onboard Bluetooth stays enabled (harmless, but it is a second
+2.4 GHz radio next to the Zigbee one — suspect it first if detection gets flaky).
 
 ---
 
@@ -210,6 +230,12 @@ Once properly configured, the sensor exposes the following entities in Zigbee2MQ
 |--------|-------------|
 | `zone1_occupied` - `zone5_occupied` | Binary occupancy per zone |
 | `zone_1_targets` - `zone_5_targets` | Target count per zone |
+
+### Ambient Light
+
+| Entity | Description |
+|--------|-------------|
+| `illuminance` | Ambient light in lux from the BH1750 (empty if not fitted) |
 
 ### Position Data (Config Mode Only)
 

@@ -52,6 +52,9 @@
 #define SHS_EP_ZONE4_TARGETS            24  /* Zone 4 target count (genAnalogInput) */
 #define SHS_EP_ZONE5_TARGETS            25  /* Zone 5 target count (genAnalogInput) */
 
+/* BH1750 ambient light endpoint */
+#define SHS_EP_ILLUMINANCE              26  /* Illuminance Measurement (msIlluminanceMeasurement) */
+
 /* Router config - mains powered, always listening, no polling needed */
 #define SHS_ZR_CONFIG()                                         \
     {                                                           \
@@ -82,6 +85,8 @@
 #define SHS_CLUSTER_BINARY_INPUT        0x000F  /* genBinaryInput - for zone occupancy */
 #define SHS_ATTR_PRESENT_VALUE          0x0055  /* presentValue attribute (analog) */
 #define SHS_ATTR_PRESENT_VALUE_BINARY   0x0055  /* presentValue attribute (binary) */
+#define SHS_CLUSTER_ILLUMINANCE         0x0400  /* msIlluminanceMeasurement - BH1750 lux */
+#define SHS_ATTR_ILLUM_MEASURED_VALUE   0x0000  /* measuredValue = 10000*log10(lux)+1 */
 
 /* Config cluster */
 #define SHS_CL_CFG_ID                   0xFDCD

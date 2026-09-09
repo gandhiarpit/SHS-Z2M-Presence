@@ -56,6 +56,9 @@ const EP_LD2450_ZONE5 = 23;
 const EP_ZONE4_TARGETS = 24;
 const EP_ZONE5_TARGETS = 25;
 
+// BH1750 ambient light sensor
+const EP_ILLUMINANCE = 26;
+
 // Config cluster (0xFDCD on EP1)
 const CLUSTER_CONFIG = 0xFDCD;
 const ATTR_MOVING_COOLDOWN = 0x0001;
@@ -193,6 +196,20 @@ const definition = {
 
     fromZigbee: [
         fz.on_off,
+        // EP26: BH1750 illuminance. The firmware sends the ZCL logarithmic value
+        // (10000*log10(lux)+1); convert it back to lux here so the published
+        // property is lux regardless of the Z2M version's own illuminance handling.
+        {
+            cluster: 'msIlluminanceMeasurement',
+            type: ['attributeReport', 'readResponse'],
+            convert: (model, msg, publish, options, meta) => {
+                if (!msg.data.hasOwnProperty('measuredValue')) return;
+                const raw = msg.data.measuredValue;
+                if (raw === 0xFFFF) return {};        // sensor not present / value invalid
+                if (raw === 0) return {illuminance: 0};  // below measurable range
+                return {illuminance: Math.round(Math.pow(10, (raw - 1) / 10000))};
+            },
+        },
         // Custom analog/binary converters BEFORE standard occupancy to prevent generic names
         {
             cluster: 'genAnalogInput',
@@ -557,6 +574,9 @@ const definition = {
     ],
 
     exposes: [
+
+        // EP26: BH1750 ambient light (lux)
+        e.illuminance(),
         // EP1: Light switch
         e.switch().withEndpoint('l1'),
 
@@ -925,6 +945,31 @@ const definition = {
                 }]);
             } catch (e) {
                 console.log(`SHS01: Failed to configure position reporting on EP${ep.ID}:`, e.message);
+            }
+        }
+
+        // Bind and configure BH1750 illuminance (EP26)
+        const endpoint26 = device.getEndpoint(EP_ILLUMINANCE);
+        if (endpoint26) {
+            try {
+                await reporting.bind(endpoint26, coordinatorEndpoint, ['msIlluminanceMeasurement']);
+            } catch (e) {
+                console.log('SHS01: Failed to bind msIlluminanceMeasurement on EP26:', e.message);
+            }
+            try {
+                await endpoint26.configureReporting('msIlluminanceMeasurement', [{
+                    attribute: 'measuredValue',
+                    minimumReportInterval: 10,
+                    maximumReportInterval: 3600,
+                    reportableChange: 500,  // ZCL units (~12% change in lux)
+                }]);
+            } catch (e) {
+                console.log('SHS01: Failed to configure illuminance reporting on EP26:', e.message);
+            }
+            try {
+                await endpoint26.read('msIlluminanceMeasurement', ['measuredValue']);
+            } catch (e) {
+                console.log('SHS01: Failed to read illuminance on EP26:', e.message);
             }
         }
 
