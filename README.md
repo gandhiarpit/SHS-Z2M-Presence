@@ -126,11 +126,41 @@ if you need to move them.
 > 30 s, and the `illuminance` entity simply stays empty.
 
 #### LD2410B instead of LD2410C
+
 The LD2410, LD2410B and LD2410C all speak the same Hi-Link serial protocol at 256000
-baud, so the firmware runs on any of them with no changes — wire it to GPIO4/GPIO5 as
-above. Two caveats: the community PCB is cut for the LD2410C footprint so a B needs
-DIY wiring, and the B's onboard Bluetooth stays enabled (harmless, but it is a second
-2.4 GHz radio next to the Zigbee one — suspect it first if detection gets flaky).
+baud, so the firmware runs on any of them with **no changes** — but the pin order is
+different, so do not reuse an LD2410C cable.
+
+| LD2410B pin | Name | Function | Connect to |
+|---|---|---|---|
+| 1 | OUT | Presence output (HIGH = detected) | leave unconnected |
+| 2 | UART_TX | Module transmits | **GPIO4** on ESP32-C6 |
+| 3 | UART_RX | Module receives | **GPIO5** on ESP32-C6 |
+| 4 | GND | Ground | GND (common with the ESP32) |
+| 5 | VCC | Power input, 5 V | 5V |
+
+Logic level is 3.3 V, so the module connects directly to the ESP32-C6 with no level shifting.
+
+> ⚠️ **The B and C are not pin-compatible.** GND and VCC stay put, but the first three
+> pins rotate:
+>
+> | Pin | LD2410**B** | LD2410**C** |
+> |---|---|---|
+> | 1 | OUT | UART_TX |
+> | 2 | UART_TX | UART_RX |
+> | 3 | UART_RX | OUT |
+> | 4 | GND | GND |
+> | 5 | VCC (5 V) | VCC (5–12 V, 5 V advised) |
+>
+> Reuse a cable made for the C on a B and pin 1 delivers `OUT` where `TX` is expected.
+> The symptom is total silence rather than garbage — a static presence line has no UART
+> start bits — which shows up in the serial log as
+> `LD2410: Status: bytes=0, frames=0, parse_err=0, uart_err=0, conn=0`.
+> **Count pins from the module's own silkscreen, not from the wire colours.**
+
+Two further caveats: the community PCB is cut for the LD2410C footprint so a B needs DIY
+wiring, and the B's onboard Bluetooth stays enabled (harmless in itself, but it is a
+second 2.4 GHz radio next to the Zigbee one — suspect it first if detection gets flaky).
 
 ---
 
@@ -143,6 +173,27 @@ When placing the LD2450 sensor in your case, ensure the sensor is oriented exact
 The 4 antenna patches (gold squares) must be positioned at the **top** of the enclosure, facing your detection area. This is critical for correct coordinate mapping.
 
 > ⚠️ **Important**: Incorrect sensor orientation will result in inverted target coordinates in the [SHS Z2M Presence Zones Add-on](https://github.com/notownblues/SHS-Z2M-Presence-Zones).
+
+### LD2410B / LD2410C Placement
+
+The LD2410's etched patch-antenna face — not the side carrying the components and shield
+— must point at the detection area, with the space in front open and unobstructed.
+
+| Parameter | Value |
+|---|---|
+| Detection angle | approx. ±60° |
+| Usable range | approx. 0.75 m to 5–6 m |
+| Wall mount height | 1.5–2 m |
+| Ceiling mount height | 2.6–3 m |
+
+When mounting behind a cover, the gap from the antenna to the inner surface of the
+enclosure should be a whole multiple of the half wavelength — **12.4 mm or 18.6 mm** at
+24.125 GHz. Arbitrary spacing detunes the antenna. Keep metal out of the field of view;
+plastic is fine.
+
+Keep continuously moving objects out of the detection zone — fans, swinging curtains,
+plants under air vents and pets all read as targets.
+
 
 ---
 
