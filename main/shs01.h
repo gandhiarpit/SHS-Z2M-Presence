@@ -78,7 +78,7 @@
  * literals because a hex escape swallows any hex digits that follow it -
  * "\x0a2026-09-09" would parse as one out-of-range escape, not \n + "2026...". */
 #define SHS_BASIC_DATE_CODE             "\x0a" "2026-09-11"
-#define SHS_BASIC_SW_BUILD_ID           "\x06" "v1.0.7"
+#define SHS_BASIC_SW_BUILD_ID           "\x06" "v1.0.8"
 
 /* ============================================================================
  * CLUSTER IDS
