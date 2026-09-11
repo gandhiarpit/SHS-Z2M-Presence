@@ -58,6 +58,8 @@ const EP_ZONE5_TARGETS = 25;
 
 // BH1750 ambient light sensor
 const EP_ILLUMINANCE = 26;
+// UV index, published only when an LTR390 is fitted
+const EP_UV_INDEX = 27;
 
 // Config cluster (0xFDCD on EP1)
 const CLUSTER_CONFIG = 0xFDCD;
@@ -225,6 +227,12 @@ const definition = {
                     result.ld2450_target_count = count;
                     // WORKAROUND: Derive occupancy from target count since EP3 occupancy cluster isn't working
                     result.occupancy_ld2450 = count > 0;
+                }
+
+                // EP27: UV index (LTR390 only). Fractional, so unlike the
+                // counts below it must not be rounded to an integer.
+                if (ep === EP_UV_INDEX && msg.data.hasOwnProperty('presentValue')) {
+                    result.uv_index = Math.round(value * 100) / 100;
                 }
 
                 // EP8-16: Position data (X/Y/Distance for 3 targets, in mm)
@@ -577,6 +585,11 @@ const definition = {
 
         // EP26: BH1750 ambient light (lux)
         e.illuminance(),
+
+        // EP27: UV index - stays empty on a BH1750 build
+        exposes.numeric('uv_index', ea.STATE)
+            .withValueMin(0)
+            .withDescription('UV index (LTR390 only; empty if a BH1750 is fitted)'),
         // EP1: Light switch
         e.switch().withEndpoint('l1'),
 
@@ -945,6 +958,31 @@ const definition = {
                 }]);
             } catch (e) {
                 console.log(`SHS01: Failed to configure position reporting on EP${ep.ID}:`, e.message);
+            }
+        }
+
+        // Bind and configure UV index (EP27) - only ever reports with an LTR390 fitted
+        const endpoint27 = device.getEndpoint(EP_UV_INDEX);
+        if (endpoint27) {
+            try {
+                await reporting.bind(endpoint27, coordinatorEndpoint, ['genAnalogInput']);
+            } catch (e) {
+                console.log('SHS01: Failed to bind genAnalogInput on EP27:', e.message);
+            }
+            try {
+                await endpoint27.configureReporting('genAnalogInput', [{
+                    attribute: 'presentValue',
+                    minimumReportInterval: 10,
+                    maximumReportInterval: 3600,
+                    reportableChange: 0.1,  // UV index units
+                }]);
+            } catch (e) {
+                console.log('SHS01: Failed to configure UV reporting on EP27:', e.message);
+            }
+            try {
+                await endpoint27.read('genAnalogInput', ['presentValue']);
+            } catch (e) {
+                console.log('SHS01: Failed to read UV index on EP27:', e.message);
             }
         }
 

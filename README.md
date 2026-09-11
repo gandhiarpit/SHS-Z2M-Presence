@@ -64,7 +64,7 @@ I came across [Rune's work](https://www.facebook.com/groups/HomeAssistant/permal
 | ESP32-C6 | Zigbee-enabled microcontroller |
 | LD2410C | Presence detection (moving/static) |
 | LD2450 | Multi-target position tracking & zones |
-| BH1750 | Ambient light measurement (lux) — optional |
+| BH1750 *or* LTR390 | Ambient light (lux); the LTR390 adds UV index — optional |
 
 ---
 
@@ -105,25 +105,43 @@ For a DIY build on a bare ESP32-C6 development board.
 
 > **Note:** Some ESP32-C6 boards have 2 x 5V pins and some have one. Both sensors can share the same 5V pin or use separate ones if available.
 
-#### BH1750 (optional ambient light sensor)
+#### Ambient light sensor — BH1750 *or* LTR390 (optional)
 
-| BH1750 pin | ESP32-C6 pin | Notes |
+Either sensor works with the same firmware image and the same wiring. They sit at
+different I2C addresses, so the firmware probes for both at boot and uses whichever
+answers — there is nothing to configure and no separate build.
+
+| Sensor | I2C address | Provides |
+|---|---|---|
+| BH1750 | `0x23` | `illuminance` (lux) |
+| LTR390 | `0x53` | `illuminance` (lux) **and** `uv_index` |
+
+Wiring, identical for either part:
+
+| Sensor pin | ESP32-C6 pin | Notes |
 |------------|--------------|-------|
 | VCC | **3V3** | Not the 5V rail the radars use — see the note below |
 | GND | GND | |
 | SDA | GPIO6 | I2C data |
 | SCL | GPIO7 | I2C clock |
-| ADDR | GND | Selects address `0x23`, which the firmware expects. GY-302/GY-30 breakouts already pull this low, so it can be left unconnected on those. Tied high the module answers on `0x5C` and will not be found. |
+| ADDR | GND | **BH1750 only** — selects `0x23`. GY-302/GY-30 breakouts already pull this low, so it can be left unconnected on those. Tied high the module answers on `0x5C` and will not be found. |
 
 The firmware drives I2C at 100 kHz with the ESP32-C6's internal pull-ups enabled, so
 no external pull-up resistors are needed for the short leads inside a case (breakout
-boards carry their own anyway). Pins are set in `components/bh1750/include/bh1750.h`
-if you need to move them.
+boards carry their own anyway). Pins are set in
+`components/light_sensor/include/light_sensor.h` if you need to move them.
 
-> **Note:** The BH1750 die runs at 2.4–3.6 V. GY-302/GY-30 breakout boards include a
-> regulator and tolerate 5 V, but a bare module does not — use the 3V3 pin. The sensor
-> is entirely optional: if it is not fitted the firmware logs a warning, retries every
-> 30 s, and the `illuminance` entity simply stays empty.
+> **Note:** Both parts are 3.3 V devices. GY-302/GY-30 and most LTR390 breakouts
+> include a regulator and tolerate 5 V, but bare modules do not — use the 3V3 pin.
+> The sensor is entirely optional: if none is fitted the firmware logs a warning,
+> retries every 30 s, and the light entities simply stay empty.
+
+> **LTR390 UV note:** the chip measures ambient light *or* UV, never both at once, so
+> the firmware alternates modes — lux at 3× gain / 18-bit, then UV at 18× gain /
+> 20-bit, which is the only combination the datasheet gives an accurate UV Index
+> conversion for. That adds roughly 420 ms per cycle. Indoors the UV index normally
+> reads at or near zero, since window glass blocks most UVB; it is most useful on a
+> sensor that can see outside.
 
 #### LD2410B instead of LD2410C
 
@@ -294,7 +312,8 @@ Once properly configured, the sensor exposes the following entities in Zigbee2MQ
 
 | Entity | Description |
 |--------|-------------|
-| `illuminance` | Ambient light in lux from the BH1750 (empty if not fitted) |
+| `illuminance` | Ambient light in lux from the BH1750 or LTR390 (empty if not fitted) |
+| `uv_index` | UV index (LTR390 only; empty with a BH1750) |
 
 ### Position Data (Config Mode Only)
 

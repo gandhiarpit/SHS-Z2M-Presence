@@ -29,7 +29,7 @@
 #include "shs01.h"
 #include "ld2410_enhanced.h"
 #include "ld2450.h"
-#include "bh1750.h"
+#include "light_sensor.h"
 #include "ha/esp_zigbee_ha_standard.h"
 #include "zcl_utility.h"
 #include "light_driver.h"
@@ -892,6 +892,12 @@ static bool shs_zb_report_binary_attr(uint8_t endpoint) {
  * 0 means "below the sensor's range", 0xFFFF means "invalid/unavailable". */
 static uint16_t shs_illuminance_zcl = 0;
 static uint16_t shs_last_reported_lux_zcl = 0xFFFF;  /* force the first report */
+
+/* UV index is only produced by the LTR390; a BH1750 build never publishes EP27.
+ * Reported as a plain float on genAnalogInput, same shape as the target counts. */
+#define SHS_UV_REPORT_CHANGE       0.1f     /* UV index units */
+static float shs_uv_index = 0.0f;
+static float shs_last_reported_uv = -1.0f;  /* force the first report */
 
 static uint16_t shs_lux_to_zcl(float lux) {
     if (lux <= 0.0f) {
@@ -2232,39 +2238,46 @@ static void shs_ld2450_task(void *pvParameters) {
 }
 
 /* ============================================================================
- * BH1750 AMBIENT LIGHT TASK
+ * AMBIENT LIGHT TASK (BH1750 or LTR390)
  * ============================================================================ */
 
-static void shs_bh1750_task(void *pvParameters) {
-    ESP_LOGI(SHS_TAG, "BH1750 processing task started");
+static void shs_light_sensor_task(void *pvParameters) {
+    ESP_LOGI(SHS_TAG, "Light sensor task started");
 
     /* Let the Zigbee stack settle before touching the I2C bus */
     vTaskDelay(pdMS_TO_TICKS(1000));
 
-    bool inited = (bh1750_init() == ESP_OK);
-    if (!inited) {
-        ESP_LOGW(SHS_TAG, "BH1750 not found on SDA=GPIO%d SCL=GPIO%d - retrying every %d ms",
-                 (int)BH1750_SDA_GPIO, (int)BH1750_SCL_GPIO, SHS_LUX_RETRY_INTERVAL_MS);
+    bool inited = (light_sensor_init() == ESP_OK);
+    if (inited) {
+        ESP_LOGI(SHS_TAG, "%s detected (%s)", light_sensor_name(),
+                 light_sensor_has_uv() ? "lux + UV index" : "lux");
+    } else {
+        ESP_LOGW(SHS_TAG, "No light sensor on SDA=GPIO%d SCL=GPIO%d - retrying every %d ms",
+                 (int)LIGHT_SENSOR_SDA_GPIO, (int)LIGHT_SENSOR_SCL_GPIO,
+                 SHS_LUX_RETRY_INTERVAL_MS);
     }
 
     uint32_t last_report_ms = 0;
+    uint32_t last_uv_report_ms = 0;
 
     while (1) {
-        /* Sensor absent or wedged: re-probe periodically so wiring it up later
+        /* Sensor absent or wedged: re-probe periodically so wiring one up later
          * (or a transient bus fault) does not need a reboot. */
         if (!inited) {
             vTaskDelay(pdMS_TO_TICKS(SHS_LUX_RETRY_INTERVAL_MS));
-            inited = (bh1750_init() == ESP_OK);
+            inited = (light_sensor_init() == ESP_OK);
             if (inited) {
-                ESP_LOGI(SHS_TAG, "BH1750 detected - illuminance reporting active");
+                ESP_LOGI(SHS_TAG, "%s detected - illuminance reporting active",
+                         light_sensor_name());
             }
             continue;
         }
 
         float lux = 0.0f;
-        esp_err_t rc = bh1750_read_lux(&lux);
+        esp_err_t rc = light_sensor_read_lux(&lux);
         if (rc != ESP_OK) {
-            ESP_LOGW(SHS_TAG, "BH1750 read failed: %s", esp_err_to_name(rc));
+            ESP_LOGW(SHS_TAG, "%s lux read failed: %s", light_sensor_name(),
+                     esp_err_to_name(rc));
             inited = false;
             continue;
         }
@@ -2289,6 +2302,38 @@ static void shs_bh1750_task(void *pvParameters) {
         } else {
             ESP_LOGD(SHS_TAG, "Illuminance: %.1f lux (zcl=%u, not reported)",
                      lux, (unsigned)shs_illuminance_zcl);
+        }
+
+        /* UV index - LTR390 only. This is a second conversion in a different
+         * sensor mode, so it costs another ~420ms on top of the lux read. */
+        if (light_sensor_has_uv()) {
+            float uvi = 0.0f;
+            rc = light_sensor_read_uvi(&uvi);
+            if (rc != ESP_OK) {
+                ESP_LOGW(SHS_TAG, "UV read failed: %s", esp_err_to_name(rc));
+            } else {
+                shs_uv_index = uvi;
+                now = (uint32_t)(esp_timer_get_time() / 1000);
+
+                float uv_delta = shs_uv_index - shs_last_reported_uv;
+                if (uv_delta < 0.0f) uv_delta = -uv_delta;
+
+                bool uv_first     = (shs_last_reported_uv < 0.0f);
+                bool uv_changed   = uv_first || (uv_delta >= SHS_UV_REPORT_CHANGE);
+                bool uv_heartbeat = (now - last_uv_report_ms) >= SHS_LUX_REPORT_MAX_MS;
+
+                if (shs_zb_ready && shs_zb_connected && !shs_zb_rejoin_pending &&
+                    (uv_changed || uv_heartbeat)) {
+                    if (shs_zb_set_analog_value(SHS_EP_UV_INDEX, shs_uv_index) &&
+                        shs_zb_report_analog_attr(SHS_EP_UV_INDEX)) {
+                        shs_last_reported_uv = shs_uv_index;
+                        last_uv_report_ms = now;
+                        ESP_LOGI(SHS_TAG, "UV index reported: %.2f", shs_uv_index);
+                    }
+                } else {
+                    ESP_LOGD(SHS_TAG, "UV index: %.2f (not reported)", shs_uv_index);
+                }
+            }
         }
 
         vTaskDelay(pdMS_TO_TICKS(SHS_LUX_POLL_INTERVAL_MS));
@@ -3113,6 +3158,35 @@ static void shs_zigbee_task(void *pvParameters) {
         esp_zcl_utility_add_ep_basic_manufacturer_info(dev_ep_list, SHS_EP_ILLUMINANCE, &info);
     }
 
+    /* ========== EP27: UV index (genAnalogInput, LTR390 only) ========== */
+    {
+        esp_zb_cluster_list_t *cl = esp_zb_zcl_cluster_list_create();
+
+        /* Basic cluster */
+        esp_zb_attribute_list_t *basic = esp_zb_basic_cluster_create(NULL);
+        esp_zb_cluster_list_add_basic_cluster(cl, basic, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+
+        /* The endpoint is always registered so the endpoint list does not change
+         * between a BH1750 and an LTR390 build - Zigbee2MQTT caches it at pairing.
+         * With a BH1750 fitted nothing ever reports here and uv_index stays empty. */
+        esp_zb_analog_input_cluster_cfg_t analog_cfg = {
+            .out_of_service = false,
+            .present_value = 0.0f,
+            .status_flags = 0,
+        };
+        esp_zb_attribute_list_t *analog_input = esp_zb_analog_input_cluster_create(&analog_cfg);
+        esp_zb_cluster_list_add_analog_input_cluster(cl, analog_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+
+        esp_zb_endpoint_config_t ep_cfg = {
+            .endpoint = SHS_EP_UV_INDEX,
+            .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
+            .app_device_id = ESP_ZB_HA_SIMPLE_SENSOR_DEVICE_ID,
+            .app_device_version = 0
+        };
+        esp_zb_ep_list_add_ep(dev_ep_list, cl, ep_cfg);
+        esp_zcl_utility_add_ep_basic_manufacturer_info(dev_ep_list, SHS_EP_UV_INDEX, &info);
+    }
+
     /* Register device and start */
     esp_zb_device_register(dev_ep_list);
     esp_zb_core_action_handler_register(shs_zb_action_handler);
@@ -3237,7 +3311,7 @@ void app_main(void) {
     xTaskCreate(shs_ld2410_task, "shs_ld2410_task", 4096, NULL, 4, NULL);
     xTaskCreate(shs_ld2450_task, "shs_ld2450_task", 4096, NULL, 4, NULL);
     xTaskCreate(shs_boot_button_task, "shs_boot_button", 8192, NULL, 4, NULL);
-    xTaskCreate(shs_bh1750_task, "shs_bh1750_task", 3072, NULL, 4, NULL);
+    xTaskCreate(shs_light_sensor_task, "shs_light_sens", 3072, NULL, 4, NULL);
 
     ESP_LOGI(SHS_TAG, "SHS01 firmware started - Position reporting via Zigbee (enable in Z2M)");
 }

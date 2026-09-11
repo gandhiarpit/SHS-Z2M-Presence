@@ -54,6 +54,7 @@
 
 /* BH1750 ambient light endpoint */
 #define SHS_EP_ILLUMINANCE              26  /* Illuminance Measurement (msIlluminanceMeasurement) */
+#define SHS_EP_UV_INDEX                 27  /* UV index, LTR390 only (genAnalogInput) */
 
 /* Router config - mains powered, always listening, no polling needed */
 #define SHS_ZR_CONFIG()                                         \
