@@ -896,6 +896,7 @@ static uint16_t shs_last_reported_lux_zcl = 0xFFFF;  /* force the first report *
 /* UV index is only produced by the LTR390; a BH1750 build never publishes EP27.
  * Reported as a plain float on genAnalogInput, same shape as the target counts. */
 #define SHS_UV_REPORT_CHANGE       0.1f     /* UV index units */
+#define SHS_LUX_MAX_READ_FAILURES  10       /* consecutive failures before re-detecting */
 static float shs_uv_index = 0.0f;
 static float shs_last_reported_uv = -1.0f;  /* force the first report */
 
@@ -2259,6 +2260,7 @@ static void shs_light_sensor_task(void *pvParameters) {
 
     uint32_t last_report_ms = 0;
     uint32_t last_uv_report_ms = 0;
+    uint32_t read_failures = 0;
 
     while (1) {
         /* Sensor absent or wedged: re-probe periodically so wiring one up later
@@ -2276,11 +2278,24 @@ static void shs_light_sensor_task(void *pvParameters) {
         float lux = 0.0f;
         esp_err_t rc = light_sensor_read_lux(&lux);
         if (rc != ESP_OK) {
-            ESP_LOGW(SHS_TAG, "%s lux read failed: %s", light_sensor_name(),
-                     esp_err_to_name(rc));
-            inited = false;
+            /* A read failure is usually transient - a marginal connection, or the
+             * bus losing an arbitration. Keep the detected sensor and retry the
+             * read; only fall back to re-detection once it looks permanent.
+             * Re-probing eagerly is worse than useless: i2c_master_probe on an
+             * address that already has a device handle is not supported, so it
+             * reports the sensor absent when it is merely unhappy. */
+            read_failures++;
+            ESP_LOGW(SHS_TAG, "%s lux read failed (%lu in a row): %s", light_sensor_name(),
+                     (unsigned long)read_failures, esp_err_to_name(rc));
+            if (read_failures >= SHS_LUX_MAX_READ_FAILURES) {
+                ESP_LOGW(SHS_TAG, "%s unresponsive - re-detecting", light_sensor_name());
+                inited = false;
+                read_failures = 0;
+            }
+            vTaskDelay(pdMS_TO_TICKS(SHS_LUX_POLL_INTERVAL_MS));
             continue;
         }
+        read_failures = 0;
 
         shs_illuminance_zcl = shs_lux_to_zcl(lux);
 

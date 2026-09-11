@@ -107,44 +107,75 @@ esp_err_t ltr390_init(i2c_master_bus_handle_t bus)
     return ESP_OK;
 }
 
-/* Configure one mode, wait out the conversion, and return the 20-bit sample. */
+/* Configure one mode, wait out the conversion, and return the 20-bit sample.
+ * Every transaction is logged on failure: ESP_ERR_INVALID_STATE covers both a
+ * NACK and a bus fault in IDF 5.x, so knowing which step failed is the only way
+ * to tell a wiring problem from a register-sequence problem. */
 static esp_err_t ltr390_measure(bool uvs_mode, uint8_t gain, uint8_t meas_rate,
                                 uint32_t int_time_ms, uint32_t *out_raw)
 {
-    if (s_dev == NULL) return ESP_ERR_INVALID_STATE;
+    const char *mode = uvs_mode ? "UVS" : "ALS";
+
+    if (s_dev == NULL) {
+        ESP_LOGW(LTR390_TAG, "%s: no device handle", mode);
+        return ESP_ERR_INVALID_STATE;
+    }
 
     esp_err_t rc = ltr390_write_reg(LTR390_REG_GAIN, gain);
-    if (rc != ESP_OK) return rc;
+    if (rc != ESP_OK) {
+        ESP_LOGW(LTR390_TAG, "%s: write GAIN=0x%02X failed: %s", mode, gain, esp_err_to_name(rc));
+        return rc;
+    }
 
     rc = ltr390_write_reg(LTR390_REG_MEAS_RATE, meas_rate);
-    if (rc != ESP_OK) return rc;
+    if (rc != ESP_OK) {
+        ESP_LOGW(LTR390_TAG, "%s: write MEAS_RATE=0x%02X failed: %s", mode, meas_rate, esp_err_to_name(rc));
+        return rc;
+    }
 
     uint8_t ctrl = LTR390_CTRL_ENABLE | (uvs_mode ? LTR390_CTRL_MODE_UVS : 0);
     rc = ltr390_write_reg(LTR390_REG_MAIN_CTRL, ctrl);
-    if (rc != ESP_OK) return rc;
+    if (rc != ESP_OK) {
+        ESP_LOGW(LTR390_TAG, "%s: write MAIN_CTRL=0x%02X failed: %s", mode, ctrl, esp_err_to_name(rc));
+        return rc;
+    }
 
     vTaskDelay(pdMS_TO_TICKS(int_time_ms + LTR390_WAKEUP_MS + LTR390_SETTLE_MS));
 
     /* One retry: the first conversion after a mode switch is occasionally still
      * in flight when the nominal integration time expires. */
+    uint8_t status = 0;
+    bool ready = false;
     for (int attempt = 0; attempt < 2; attempt++) {
-        uint8_t status = 0;
         rc = ltr390_read_regs(LTR390_REG_MAIN_STATUS, &status, 1);
-        if (rc != ESP_OK) return rc;
-        if (status & LTR390_STATUS_DATA_READY) break;
-        if (attempt == 1) {
-            ESP_LOGW(LTR390_TAG, "%s data not ready", uvs_mode ? "UVS" : "ALS");
-            return ESP_ERR_TIMEOUT;
+        if (rc != ESP_OK) {
+            ESP_LOGW(LTR390_TAG, "%s: read MAIN_STATUS failed: %s", mode, esp_err_to_name(rc));
+            return rc;
         }
+        if (status & LTR390_STATUS_DATA_READY) {
+            ready = true;
+            break;
+        }
+        ESP_LOGD(LTR390_TAG, "%s: status=0x%02X not ready (attempt %d)", mode, status, attempt + 1);
         vTaskDelay(pdMS_TO_TICKS(int_time_ms / 2 + LTR390_SETTLE_MS));
+    }
+
+    if (!ready) {
+        ESP_LOGW(LTR390_TAG, "%s: data never became ready (status=0x%02X)", mode, status);
+        return ESP_ERR_TIMEOUT;
     }
 
     uint8_t buf[3] = {0, 0, 0};
     rc = ltr390_read_regs(uvs_mode ? LTR390_REG_UVSDATA : LTR390_REG_ALSDATA, buf, sizeof(buf));
-    if (rc != ESP_OK) return rc;
+    if (rc != ESP_OK) {
+        ESP_LOGW(LTR390_TAG, "%s: read data failed: %s", mode, esp_err_to_name(rc));
+        return rc;
+    }
 
     /* 20-bit result, LSB first; the top 4 bits of the third byte are reserved */
     *out_raw = ((uint32_t)(buf[2] & 0x0F) << 16) | ((uint32_t)buf[1] << 8) | buf[0];
+    ESP_LOGI(LTR390_TAG, "%s: status=0x%02X raw=%lu (%02X %02X %02X)",
+             mode, status, (unsigned long)*out_raw, buf[0], buf[1], buf[2]);
     return ESP_OK;
 }
 
