@@ -53,12 +53,9 @@ esp_err_t bh1750_init(i2c_master_bus_handle_t bus)
         }
     }
 
-    /* The BH1750 has no ID register, so presence is an address ACK plus a
-     * command the part must accept. */
-    esp_err_t rc = i2c_master_probe(s_bus, BH1750_ADDR, BH1750_I2C_TIMEOUT_MS);
-    if (rc != ESP_OK) return rc;
-
-    rc = bh1750_write_cmd(BH1750_CMD_POWER_ON);
+    /* The BH1750 has no ID register. The facade has already confirmed something
+     * ACKs at this address, so presence here means the part accepts a command. */
+    esp_err_t rc = bh1750_write_cmd(BH1750_CMD_POWER_ON);
     if (rc == ESP_OK) {
         rc = bh1750_write_cmd(BH1750_CMD_RESET);
     }
