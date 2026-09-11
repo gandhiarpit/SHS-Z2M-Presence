@@ -162,7 +162,7 @@ static esp_err_t ltr390_measure(bool uvs_mode, uint8_t gain, uint8_t meas_rate,
     if (ltr390_read_regs(LTR390_REG_MAIN_CTRL, &cfg[0], 1) == ESP_OK &&
         ltr390_read_regs(LTR390_REG_MEAS_RATE, &cfg[1], 1) == ESP_OK &&
         ltr390_read_regs(LTR390_REG_GAIN,      &cfg[2], 1) == ESP_OK) {
-        ESP_LOGI(LTR390_TAG, "%s: readback MAIN_CTRL=0x%02X (wrote 0x%02X) MEAS_RATE=0x%02X (0x%02X) GAIN=0x%02X (0x%02X)",
+        ESP_LOGD(LTR390_TAG, "%s: readback MAIN_CTRL=0x%02X (wrote 0x%02X) MEAS_RATE=0x%02X (0x%02X) GAIN=0x%02X (0x%02X)",
                  mode, cfg[0], ctrl, cfg[1], meas_rate, cfg[2], gain);
     } else {
         ESP_LOGW(LTR390_TAG, "%s: config readback failed", mode);
@@ -206,7 +206,7 @@ static esp_err_t ltr390_measure(bool uvs_mode, uint8_t gain, uint8_t meas_rate,
 
     /* 20-bit result, LSB first; the top 4 bits of the third byte are reserved */
     *out_raw = ((uint32_t)(buf[2] & 0x0F) << 16) | ((uint32_t)buf[1] << 8) | buf[0];
-    ESP_LOGI(LTR390_TAG, "%s: status=0x%02X raw=%lu (%02X %02X %02X)",
+    ESP_LOGD(LTR390_TAG, "%s: status=0x%02X raw=%lu (%02X %02X %02X)",
              mode, status, (unsigned long)*out_raw, buf[0], buf[1], buf[2]);
     return ESP_OK;
 }
