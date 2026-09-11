@@ -62,7 +62,18 @@ static const char *LTR390_TAG = "LTR390";
 
 #define LTR390_I2C_TIMEOUT_MS       100
 
+static i2c_master_bus_handle_t s_bus = NULL;
 static i2c_master_dev_handle_t s_dev = NULL;
+
+/* A NACK or bus fault leaves the I2C state machine wedged: every later
+ * transaction then returns ESP_ERR_INVALID_STATE regardless of the hardware.
+ * Reset the bus so the next attempt starts clean instead of inheriting it. */
+static void ltr390_bus_recover(const char *what)
+{
+    if (s_bus == NULL) return;
+    esp_err_t rc = i2c_master_bus_reset(s_bus);
+    ESP_LOGW(LTR390_TAG, "bus reset after %s: %s", what, esp_err_to_name(rc));
+}
 
 static esp_err_t ltr390_write_reg(uint8_t reg, uint8_t value)
 {
@@ -78,6 +89,7 @@ static esp_err_t ltr390_read_regs(uint8_t reg, uint8_t *out, size_t len)
 esp_err_t ltr390_init(i2c_master_bus_handle_t bus)
 {
     if (bus == NULL) return ESP_ERR_INVALID_ARG;
+    s_bus = bus;
 
     if (s_dev == NULL) {
         i2c_device_config_t dev_cfg = {
@@ -124,12 +136,14 @@ static esp_err_t ltr390_measure(bool uvs_mode, uint8_t gain, uint8_t meas_rate,
     esp_err_t rc = ltr390_write_reg(LTR390_REG_GAIN, gain);
     if (rc != ESP_OK) {
         ESP_LOGW(LTR390_TAG, "%s: write GAIN=0x%02X failed: %s", mode, gain, esp_err_to_name(rc));
+        ltr390_bus_recover("GAIN write");
         return rc;
     }
 
     rc = ltr390_write_reg(LTR390_REG_MEAS_RATE, meas_rate);
     if (rc != ESP_OK) {
         ESP_LOGW(LTR390_TAG, "%s: write MEAS_RATE=0x%02X failed: %s", mode, meas_rate, esp_err_to_name(rc));
+        ltr390_bus_recover("MEAS_RATE write");
         return rc;
     }
 
@@ -137,7 +151,23 @@ static esp_err_t ltr390_measure(bool uvs_mode, uint8_t gain, uint8_t meas_rate,
     rc = ltr390_write_reg(LTR390_REG_MAIN_CTRL, ctrl);
     if (rc != ESP_OK) {
         ESP_LOGW(LTR390_TAG, "%s: write MAIN_CTRL=0x%02X failed: %s", mode, ctrl, esp_err_to_name(rc));
+        ltr390_bus_recover("MAIN_CTRL write");
         return rc;
+    }
+
+    /* The new I2C driver can report ESP_OK for a transaction that did not
+     * actually land, so read the three registers back: if they do not hold
+     * what was just written, the writes are the fault, not the read. */
+    uint8_t cfg[3] = {0xFF, 0xFF, 0xFF};
+    if (ltr390_read_regs(LTR390_REG_MAIN_CTRL, &cfg[0], 1) == ESP_OK &&
+        ltr390_read_regs(LTR390_REG_MEAS_RATE, &cfg[1], 1) == ESP_OK &&
+        ltr390_read_regs(LTR390_REG_GAIN,      &cfg[2], 1) == ESP_OK) {
+        ESP_LOGI(LTR390_TAG, "%s: readback MAIN_CTRL=0x%02X (wrote 0x%02X) MEAS_RATE=0x%02X (0x%02X) GAIN=0x%02X (0x%02X)",
+                 mode, cfg[0], ctrl, cfg[1], meas_rate, cfg[2], gain);
+    } else {
+        ESP_LOGW(LTR390_TAG, "%s: config readback failed", mode);
+        ltr390_bus_recover("config readback");
+        return ESP_ERR_INVALID_STATE;
     }
 
     vTaskDelay(pdMS_TO_TICKS(int_time_ms + LTR390_WAKEUP_MS + LTR390_SETTLE_MS));
@@ -150,6 +180,7 @@ static esp_err_t ltr390_measure(bool uvs_mode, uint8_t gain, uint8_t meas_rate,
         rc = ltr390_read_regs(LTR390_REG_MAIN_STATUS, &status, 1);
         if (rc != ESP_OK) {
             ESP_LOGW(LTR390_TAG, "%s: read MAIN_STATUS failed: %s", mode, esp_err_to_name(rc));
+            ltr390_bus_recover("MAIN_STATUS read");
             return rc;
         }
         if (status & LTR390_STATUS_DATA_READY) {
@@ -169,6 +200,7 @@ static esp_err_t ltr390_measure(bool uvs_mode, uint8_t gain, uint8_t meas_rate,
     rc = ltr390_read_regs(uvs_mode ? LTR390_REG_UVSDATA : LTR390_REG_ALSDATA, buf, sizeof(buf));
     if (rc != ESP_OK) {
         ESP_LOGW(LTR390_TAG, "%s: read data failed: %s", mode, esp_err_to_name(rc));
+        ltr390_bus_recover("data read");
         return rc;
     }
 
