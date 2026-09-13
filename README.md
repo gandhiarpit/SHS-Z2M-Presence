@@ -2,8 +2,7 @@
 
 **Dual mmWave Presence Sensor Firmware for ESP32-C6 with Zigbee2MQTT Support**
 
-![SHS-Z2M-Presence](docs/SHS_case3.webp)
-
+TODO: I will update the readme with relevant details.
 ---
 
 ## Overview
