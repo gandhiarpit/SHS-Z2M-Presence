@@ -542,6 +542,12 @@ static void shs_zone_cfg_apply_to_sensor(void) {
     /* Set global zone type (disabled/detection/filter) */
     ld2450_set_zone_type((ld2450_zone_type_t)shs_zone_type);
 
+    /* One config session for all five zones. Each set/clear used to run its
+     * own enter-write-exit cycle, and entering config mode stops the target
+     * data stream - so five sessions meant five chances to leave the sensor
+     * parked in config mode with no data coming out. */
+    ld2450_begin_zone_batch();
+
     /* Configure each zone */
     if (shs_zone1_enabled) {
         ld2450_set_zone(0, shs_zone1_x1, shs_zone1_y1, shs_zone1_x2, shs_zone1_y2);
@@ -590,6 +596,12 @@ static void shs_zone_cfg_apply_to_sensor(void) {
     if (shs_zone_cfg_save_needed) {
         shs_zone_cfg_save_to_nvs();
         shs_zone_cfg_save_needed = false;
+    }
+
+    /* Push all five zones to the sensor in a single enter-write-exit cycle */
+    esp_err_t zrc = ld2450_end_zone_batch();
+    if (zrc != ESP_OK) {
+        ESP_LOGW(SHS_TAG, "Zone config apply failed: %s", esp_err_to_name(zrc));
     }
 }
 
@@ -2153,7 +2165,10 @@ static void shs_ld2450_task(void *pvParameters) {
             ESP_LOGW(SHS_TAG, "LD2450 disconnected - will attempt recovery");
         } else if ((now - last_connected_time) > RECOVERY_INTERVAL_MS && last_connected_time > 0) {
             /* Periodically try to restart LD2450 if it stays disconnected */
-            ESP_LOGW(SHS_TAG, "LD2450 still disconnected - sending restart command");
+            ESP_LOGW(SHS_TAG, "LD2450 still disconnected - leaving config mode, then restarting");
+            /* A stopped data stream usually means the sensor is still in config
+             * mode, so try that before the bigger hammer. */
+            ld2450_exit_config_mode();
             ld2450_restart();
             last_connected_time = now;  // Reset timer
             vTaskDelay(pdMS_TO_TICKS(500));  // Give sensor time to restart

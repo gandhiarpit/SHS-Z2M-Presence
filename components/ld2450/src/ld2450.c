@@ -39,6 +39,8 @@ static uint32_t s_last_status_time = 0;
 static uint32_t s_last_valid_frame_time = 0;
 static uint32_t s_frame_start_time = 0;
 
+static bool s_zone_batch = false;
+
 /* Callbacks */
 static ld2450_target_callback_t s_target_callback = NULL;
 static ld2450_zone_callback_t s_zone_callback = NULL;
@@ -710,13 +712,48 @@ esp_err_t ld2450_set_zone_type(ld2450_zone_type_t type) {
  * Note: The LD2450 zone configuration protocol may vary by firmware version.
  * This implements a generic approach. Adjust based on actual protocol specs.
  */
+/**
+ * @brief Start batching zone changes - set/clear calls stop applying immediately
+ */
+void ld2450_begin_zone_batch(void) {
+    s_zone_batch = true;
+}
+
+/**
+ * @brief End batching and push every zone to the sensor in one config session
+ */
+esp_err_t ld2450_end_zone_batch(void) {
+    s_zone_batch = false;
+    return ld2450_apply_zones();
+}
+
+/**
+ * @brief Leave config mode. Public so a stalled data stream can be recovered.
+ */
+esp_err_t ld2450_exit_config_mode(void) {
+    return exit_config_mode();
+}
+
 esp_err_t ld2450_apply_zones(void) {
     esp_err_t ret;
+
+    /* While batching, callers are still filling in local zone state; the
+     * single apply happens in ld2450_end_zone_batch(). Without this each
+     * set/clear ran its own enter-write-exit cycle - five sessions to
+     * configure five zones. */
+    if (s_zone_batch) {
+        return ESP_OK;
+    }
 
     // Enter config mode
     ret = enter_config_mode();
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to enter config mode");
+        /* Do NOT return here. The most likely reason for a failure status is
+         * that the module is already in config mode from an earlier attempt,
+         * and config mode stops the target data stream. Returning early was
+         * what left the sensor parked in config mode with no data at all. */
+        ESP_LOGW(TAG, "Enter config mode failed - exiting config mode anyway");
+        exit_config_mode();
         return ret;
     }
 
@@ -754,10 +791,10 @@ esp_err_t ld2450_apply_zones(void) {
         vTaskDelay(pdMS_TO_TICKS(20));
     }
 
-    // Exit config mode
+    // Exit config mode - the data stream stays off until this lands
     ret = exit_config_mode();
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to exit config mode");
+        ESP_LOGE(TAG, "Failed to exit config mode - data stream will stay stopped");
         return ret;
     }
 

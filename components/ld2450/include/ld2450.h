@@ -269,6 +269,15 @@ esp_err_t ld2450_set_zone_type(ld2450_zone_type_t type);
  */
 esp_err_t ld2450_apply_zones(void);
 
+/* Batch several zone changes into one config session. Without this each
+ * set/clear runs its own enter-write-exit cycle against the sensor. */
+void ld2450_begin_zone_batch(void);
+esp_err_t ld2450_end_zone_batch(void);
+
+/* Leave config mode - recovers a sensor whose data stream has stopped. */
+esp_err_t ld2450_exit_config_mode(void);
+
+
 /**
  * @brief Read firmware version from sensor
  * @return ESP_OK on success
