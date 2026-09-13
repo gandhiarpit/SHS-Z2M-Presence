@@ -1297,9 +1297,10 @@ static void shs_zone_holdoff_check(void) {
  * Split into individual lock/release pairs to prevent blocking Zigbee task.
  */
 static void shs_ld2450_force_update(void) {
-    ESP_LOGI(SHS_TAG, "Forcing LD2450 state update to Zigbee: occ=%d count=%d z1=%d z2=%d z3=%d",
+    ESP_LOGI(SHS_TAG, "Forcing LD2450 state update to Zigbee: occ=%d count=%d zones=%d%d%d%d%d",
              shs_ld2450_occupancy, shs_ld2450_target_count,
-             shs_zone1_occupied, shs_zone2_occupied, shs_zone3_occupied);
+             shs_zone1_occupied, shs_zone2_occupied, shs_zone3_occupied,
+             shs_zone4_occupied, shs_zone5_occupied);
 
     /* Give Z2M a moment to finish pairing interview */
     vTaskDelay(pdMS_TO_TICKS(1000));
@@ -1334,93 +1335,38 @@ static void shs_ld2450_force_update(void) {
     }
     vTaskDelay(pdMS_TO_TICKS(10));
 
-    /* EP5: Zone 1 */
-    if (esp_zb_lock_acquire(pdMS_TO_TICKS(SHS_FORCE_UPDATE_LOCK_TIMEOUT_MS))) {
-        uint8_t z1_val = shs_zone1_occupied ? 1 : 0;
-        esp_zb_zcl_set_attribute_val(
-            SHS_EP_LD2450_ZONE1,
-            SHS_CLUSTER_BINARY_INPUT,
-            ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-            SHS_ATTR_PRESENT_VALUE_BINARY,
-            &z1_val,
-            true  /* report = true */
-        );
-        esp_zb_lock_release();
-    }
-    vTaskDelay(pdMS_TO_TICKS(10));
+    /* Zone occupancy (EP5-7/22/23) and target counts (EP19-21/24/25).
+     * Zones 4 and 5 used to be missing here while 1-3 were pushed, so a freshly
+     * rebooted device left zone_4/zone_5 entities empty in Zigbee2MQTT until
+     * something happened to change them. */
+    for (int i = 0; i < SHS_ZONE_COUNT; i++) {
+        if (esp_zb_lock_acquire(pdMS_TO_TICKS(SHS_FORCE_UPDATE_LOCK_TIMEOUT_MS))) {
+            uint8_t occ_val = *shs_zone_occ_state[i] ? 1 : 0;
+            esp_zb_zcl_set_attribute_val(
+                shs_zone_occ_ep[i],
+                SHS_CLUSTER_BINARY_INPUT,
+                ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                SHS_ATTR_PRESENT_VALUE_BINARY,
+                &occ_val,
+                true  /* report = true */
+            );
+            esp_zb_lock_release();
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
 
-    /* EP6: Zone 2 */
-    if (esp_zb_lock_acquire(pdMS_TO_TICKS(SHS_FORCE_UPDATE_LOCK_TIMEOUT_MS))) {
-        uint8_t z2_val = shs_zone2_occupied ? 1 : 0;
-        esp_zb_zcl_set_attribute_val(
-            SHS_EP_LD2450_ZONE2,
-            SHS_CLUSTER_BINARY_INPUT,
-            ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-            SHS_ATTR_PRESENT_VALUE_BINARY,
-            &z2_val,
-            true  /* report = true */
-        );
-        esp_zb_lock_release();
-    }
-    vTaskDelay(pdMS_TO_TICKS(10));
-
-    /* EP7: Zone 3 */
-    if (esp_zb_lock_acquire(pdMS_TO_TICKS(SHS_FORCE_UPDATE_LOCK_TIMEOUT_MS))) {
-        uint8_t z3_val = shs_zone3_occupied ? 1 : 0;
-        esp_zb_zcl_set_attribute_val(
-            SHS_EP_LD2450_ZONE3,
-            SHS_CLUSTER_BINARY_INPUT,
-            ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-            SHS_ATTR_PRESENT_VALUE_BINARY,
-            &z3_val,
-            true  /* report = true */
-        );
-        esp_zb_lock_release();
-    }
-    vTaskDelay(pdMS_TO_TICKS(10));
-
-    /* EP19: Zone 1 target count */
-    if (esp_zb_lock_acquire(pdMS_TO_TICKS(SHS_FORCE_UPDATE_LOCK_TIMEOUT_MS))) {
-        float z1_targets_val = (float)shs_zone1_targets;
-        esp_zb_zcl_set_attribute_val(
-            SHS_EP_ZONE1_TARGETS,
-            SHS_CLUSTER_ANALOG_INPUT,
-            ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-            SHS_ATTR_PRESENT_VALUE,
-            &z1_targets_val,
-            true  /* report = true */
-        );
-        esp_zb_lock_release();
-    }
-    vTaskDelay(pdMS_TO_TICKS(10));
-
-    /* EP20: Zone 2 target count */
-    if (esp_zb_lock_acquire(pdMS_TO_TICKS(SHS_FORCE_UPDATE_LOCK_TIMEOUT_MS))) {
-        float z2_targets_val = (float)shs_zone2_targets;
-        esp_zb_zcl_set_attribute_val(
-            SHS_EP_ZONE2_TARGETS,
-            SHS_CLUSTER_ANALOG_INPUT,
-            ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-            SHS_ATTR_PRESENT_VALUE,
-            &z2_targets_val,
-            true  /* report = true */
-        );
-        esp_zb_lock_release();
-    }
-    vTaskDelay(pdMS_TO_TICKS(10));
-
-    /* EP21: Zone 3 target count */
-    if (esp_zb_lock_acquire(pdMS_TO_TICKS(SHS_FORCE_UPDATE_LOCK_TIMEOUT_MS))) {
-        float z3_targets_val = (float)shs_zone3_targets;
-        esp_zb_zcl_set_attribute_val(
-            SHS_EP_ZONE3_TARGETS,
-            SHS_CLUSTER_ANALOG_INPUT,
-            ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-            SHS_ATTR_PRESENT_VALUE,
-            &z3_targets_val,
-            true  /* report = true */
-        );
-        esp_zb_lock_release();
+        if (esp_zb_lock_acquire(pdMS_TO_TICKS(SHS_FORCE_UPDATE_LOCK_TIMEOUT_MS))) {
+            float cnt_val = (float)*shs_zone_cnt_state[i];
+            esp_zb_zcl_set_attribute_val(
+                shs_zone_cnt_ep[i],
+                SHS_CLUSTER_ANALOG_INPUT,
+                ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                SHS_ATTR_PRESENT_VALUE,
+                &cnt_val,
+                true  /* report = true */
+            );
+            esp_zb_lock_release();
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 
     shs_last_successful_tx = (uint32_t)(esp_timer_get_time() / 1000);
