@@ -632,7 +632,30 @@ static esp_err_t send_command(uint16_t cmd, const uint8_t *params, int param_len
  * @brief Enter configuration mode
  */
 static esp_err_t enter_config_mode(void) {
-    return send_command(LD2450_CMD_ENABLE_CONFIG, NULL, 0, true);
+    /* Enable-config carries a mandatory 0x0001 command value. Sending it
+     * bare is what the module was rejecting with status 0x0001 - it parsed
+     * the frame fine and refused the command. The LD2410 driver has always
+     * sent this parameter, which is why its config mode works. */
+    uint8_t value[] = {0x01, 0x00};
+
+    /* The LD2450 streams targets continuously, so an ACK arrives interleaved
+     * with data frames. Clear what is in flight first and retry a couple of
+     * times, as the LD2410 driver does. */
+    esp_err_t err = ESP_FAIL;
+    for (int attempt = 0; attempt < 3; attempt++) {
+        uart_flush_input(LD2450_UART_NUM);
+        reset_frame_parser();
+        vTaskDelay(pdMS_TO_TICKS(100 + (attempt * 50)));
+        uart_flush_input(LD2450_UART_NUM);
+
+        err = send_command(LD2450_CMD_ENABLE_CONFIG, value, sizeof(value), true);
+        if (err == ESP_OK) {
+            return ESP_OK;
+        }
+        ESP_LOGW(TAG, "Config mode attempt %d failed, retrying...", attempt + 1);
+    }
+
+    return err;
 }
 
 /**
