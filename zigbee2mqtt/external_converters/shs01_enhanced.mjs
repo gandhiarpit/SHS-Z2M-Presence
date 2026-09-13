@@ -65,6 +65,7 @@ const EP_UV_INDEX = 27;
 const CLUSTER_CONFIG = 0xFDCD;
 const ATTR_MOVING_COOLDOWN = 0x0001;
 const ATTR_OCCUPANCY_DELAY = 0x0002;
+const ATTR_ZONE_OCC_DELAY = 0x0007;
 const ATTR_MOVING_SENSITIVITY = 0x0003;
 const ATTR_STATIC_SENSITIVITY = 0x0004;
 const ATTR_MOVING_MAX_GATE = 0x0005;
@@ -352,6 +353,9 @@ const definition = {
                 if (msg.data.hasOwnProperty(ATTR_OCCUPANCY_DELAY)) {
                     result.occupancy_delay = msg.data[ATTR_OCCUPANCY_DELAY];
                 }
+                if (msg.data.hasOwnProperty(ATTR_ZONE_OCC_DELAY)) {
+                    result.zone_occupancy_delay = msg.data[ATTR_ZONE_OCC_DELAY];
+                }
                 if (msg.data.hasOwnProperty(ATTR_MOVING_SENSITIVITY)) {
                     result.moving_sensitivity = msg.data[ATTR_MOVING_SENSITIVITY];
                 }
@@ -393,7 +397,8 @@ const definition = {
     toZigbee: [
         tz.on_off,
         {
-            key: ['moving_cooldown', 'occupancy_delay', 'moving_sensitivity', 'static_sensitivity',
+            key: ['moving_cooldown', 'occupancy_delay', 'zone_occupancy_delay',
+                  'moving_sensitivity', 'static_sensitivity',
                   'moving_max_distance', 'static_max_distance', 'position_reporting'],
             convertSet: async (entity, key, value, meta) => {
                 const endpoint = meta.device.getEndpoint(EP_LIGHT);
@@ -406,6 +411,7 @@ const definition = {
                 const lookup = {
                     'moving_cooldown': {id: ATTR_MOVING_COOLDOWN, type: 0x21},
                     'occupancy_delay': {id: ATTR_OCCUPANCY_DELAY, type: 0x21},
+                    'zone_occupancy_delay': {id: ATTR_ZONE_OCC_DELAY, type: 0x21},
                     'moving_sensitivity': {id: ATTR_MOVING_SENSITIVITY, type: 0x21},
                     'static_sensitivity': {id: ATTR_STATIC_SENSITIVITY, type: 0x21},
                     'moving_max_distance': {id: ATTR_MOVING_MAX_GATE, type: 0x21},
@@ -454,6 +460,7 @@ const definition = {
                 const lookup = {
                     'moving_cooldown': ATTR_MOVING_COOLDOWN,
                     'occupancy_delay': ATTR_OCCUPANCY_DELAY,
+                    'zone_occupancy_delay': ATTR_ZONE_OCC_DELAY,
                     'moving_sensitivity': ATTR_MOVING_SENSITIVITY,
                     'static_sensitivity': ATTR_STATIC_SENSITIVITY,
                     'moving_max_distance': ATTR_MOVING_MAX_GATE,
@@ -679,39 +686,47 @@ const definition = {
             .withUnit('mm')
             .withDescription('Target 3 distance from sensor'),
 
-        // Configuration
+        // Configuration. Descriptions carry the firmware default so the value a
+        // field resets to is visible without digging through the source.
         exposes.numeric('moving_cooldown', ea.ALL)
             .withValueMin(0)
             .withValueMax(300)
             .withUnit('s')
-            .withDescription('Movement detection cooldown'),
+            .withDescription('Movement detection cooldown (default: 0s)'),
         exposes.numeric('occupancy_delay', ea.ALL)
             .withValueMin(0)
             .withValueMax(300)
             .withUnit('s')
-            .withDescription('Occupancy clear delay'),
+            .withDescription('LD2410 occupancy clear delay (default: 0s)'),
+        exposes.numeric('zone_occupancy_delay', ea.ALL)
+            .withValueMin(0)
+            .withValueMax(300)
+            .withUnit('s')
+            .withDescription('Hold each zone occupied this long after its last target leaves. '
+                + 'Smooths the flicker caused by the LD2450 briefly losing a stationary target. '
+                + 'Applies to zone occupancy only, not target counts (default: 0s)'),
         exposes.numeric('moving_sensitivity', ea.ALL)
             .withValueMin(0)
             .withValueMax(10)
-            .withDescription('Moving target sensitivity (0-10)'),
+            .withDescription('Moving target sensitivity, 0-10 (default: 4)'),
         exposes.numeric('static_sensitivity', ea.ALL)
             .withValueMin(0)
             .withValueMax(10)
-            .withDescription('Static target sensitivity (0-10)'),
+            .withDescription('Static target sensitivity, 0-10 (default: 5)'),
         exposes.numeric('moving_max_distance', ea.ALL)
             .withValueMin(0)
             .withValueMax(6)
             .withValueStep(0.75)
             .withUnit('m')
-            .withDescription('Max distance for moving detection (0-6m)'),
+            .withDescription('Max distance for moving detection, 0-6m (default: 6m)'),
         exposes.numeric('static_max_distance', ea.ALL)
             .withValueMin(1.5)
             .withValueMax(6)
             .withValueStep(0.75)
             .withUnit('m')
-            .withDescription('Max distance for static detection (1.5-6m)'),
+            .withDescription('Max distance for static detection, 1.5-6m (default: 6m)'),
         exposes.binary('position_reporting', ea.ALL, true, false)
-            .withDescription('Enable position reporting for zone configuration (increases Zigbee traffic)'),
+            .withDescription('Enable position reporting for zone configuration; increases Zigbee traffic (default: off)'),
 
         // Zone configuration - composite object that accepts all zone settings at once
         exposes.composite('zone_config', 'zone_config', ea.SET)
@@ -1016,6 +1031,7 @@ const definition = {
             await endpoint1.read(CLUSTER_CONFIG, [
                 ATTR_MOVING_COOLDOWN,
                 ATTR_OCCUPANCY_DELAY,
+                ATTR_ZONE_OCC_DELAY,
                 ATTR_MOVING_SENSITIVITY,
                 ATTR_STATIC_SENSITIVITY,
                 ATTR_MOVING_MAX_GATE,

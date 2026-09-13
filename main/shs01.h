@@ -101,6 +101,7 @@
 
 #define SHS_ATTR_MOVEMENT_COOLDOWN      0x0001  /* uint16, seconds (moving target cooldown) */
 #define SHS_ATTR_OCC_CLEAR_COOLDOWN     0x0002  /* uint16, seconds (occupancy delay) */
+#define SHS_ATTR_ZONE_OCC_DELAY         0x0007  /* uint16, seconds (zone occupancy clear delay) */
 #define SHS_ATTR_MOVING_SENS_0_10       0x0003  /* uint16, 0-10 scale */
 #define SHS_ATTR_STATIC_SENS_0_10       0x0004  /* uint16, 0-10 scale */
 #define SHS_ATTR_MOVING_MAX_GATE        0x0005  /* uint16, 0-8 (movement detection range) */
@@ -161,6 +162,9 @@
 /* ============================================================================
  * BOOT BUTTON & MISC
  * ============================================================================ */
+
+/* LD2450 zone count - must match LD2450_MAX_ZONES in the driver */
+#define SHS_ZONE_COUNT                  5
 
 #define SHS_BOOT_BUTTON_GPIO            GPIO_NUM_9
 

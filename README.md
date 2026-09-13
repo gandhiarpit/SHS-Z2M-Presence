@@ -308,6 +308,14 @@ Once properly configured, the sensor exposes the following entities in Zigbee2MQ
 | `zone1_occupied` - `zone5_occupied` | Binary occupancy per zone |
 | `zone_1_targets` - `zone_5_targets` | Target count per zone |
 
+Zone occupancy is pure geometry - a zone is occupied while at least one LD2450
+target sits inside its rectangle, re-evaluated on every sensor frame. The LD2410
+settings (`moving_cooldown`, `occupancy_delay`) do **not** affect it. Because the
+LD2450 occasionally drops a stationary target for a frame or two, set
+`zone_occupancy_delay` to hold a zone occupied for a few seconds after its last
+target leaves; a target returning inside that window cancels the pending clear.
+Target counts stay instantaneous either way.
+
 ### Ambient Light
 
 | Entity | Description |
@@ -325,15 +333,16 @@ Once properly configured, the sensor exposes the following entities in Zigbee2MQ
 
 ### Configuration Options
 
-| Entity | Range | Description |
-|--------|-------|-------------|
-| `moving_cooldown` | 0-300s | Time before motion clears |
-| `occupancy_delay` | 0-300s | Time before occupancy clears |
-| `moving_sensitivity` | 0-10 | Moving detection sensitivity |
-| `static_sensitivity` | 0-10 | Static detection sensitivity |
-| `moving_max_distance` | 0-6m | Maximum moving detection range |
-| `static_max_distance` | 1.5-6m | Maximum static detection range |
-| `position_reporting` | On/Off | Enable Config Mode |
+| Entity | Range | Default | Description |
+|--------|-------|---------|-------------|
+| `moving_cooldown` | 0-300s | 0s | Time before LD2410 motion clears |
+| `occupancy_delay` | 0-300s | 0s | Time before LD2410 occupancy clears |
+| `zone_occupancy_delay` | 0-300s | 0s | Time before an LD2450 zone clears |
+| `moving_sensitivity` | 0-10 | 4 | Moving detection sensitivity |
+| `static_sensitivity` | 0-10 | 5 | Static detection sensitivity |
+| `moving_max_distance` | 0-6m | 6m | Maximum moving detection range |
+| `static_max_distance` | 1.5-6m | 6m | Maximum static detection range |
+| `position_reporting` | On/Off | Off | Enable Config Mode |
 
 ---
 

@@ -55,6 +55,7 @@ static SemaphoreHandle_t target_data_mutex = NULL;
 #define SHS_NVS_NAMESPACE       "cfg"
 #define SHS_NVS_KEY_MV_CD       "mv_cd"
 #define SHS_NVS_KEY_OCC_CD      "occ_cd"
+#define SHS_NVS_KEY_ZONE_CD     "zone_cd"
 #define SHS_NVS_KEY_MV_SENS     "mv_sens"
 #define SHS_NVS_KEY_ST_SENS     "st_sens"
 #define SHS_NVS_KEY_MV_GATE     "mv_gate"
@@ -100,6 +101,7 @@ static SemaphoreHandle_t target_data_mutex = NULL;
 /* Basic config (original) */
 static uint16_t shs_movement_cooldown_sec = 0;
 static uint16_t shs_occupancy_clear_sec   = 0;
+static uint16_t shs_zone_occupancy_delay_sec = 0;  /* hold zones occupied this long after the last target leaves */
 static uint32_t shs_moving_cooldown_until = 0;  /* Cooldown timestamp for moving target */
 static uint32_t shs_static_cooldown_until = 0;  /* Cooldown timestamp for static target */
 static uint8_t  shs_moving_sens_0_100     = 60;
@@ -334,6 +336,8 @@ static void shs_cfg_load_from_nvs(void) {
         shs_movement_cooldown_sec = (u16tmp > SHS_COOLDOWN_MAX_SEC) ? SHS_COOLDOWN_MAX_SEC : u16tmp;
     if (nvs_get_u16(h, SHS_NVS_KEY_OCC_CD, &u16tmp) == ESP_OK)
         shs_occupancy_clear_sec = u16tmp;
+    if (nvs_get_u16(h, SHS_NVS_KEY_ZONE_CD, &u16tmp) == ESP_OK)
+        shs_zone_occupancy_delay_sec = (u16tmp > SHS_COOLDOWN_MAX_SEC) ? SHS_COOLDOWN_MAX_SEC : u16tmp;
     if (nvs_get_u8(h, SHS_NVS_KEY_MV_SENS, &u8tmp) == ESP_OK)
         shs_moving_sens_0_100 = (u8tmp > 100) ? 100 : u8tmp;
     if (nvs_get_u8(h, SHS_NVS_KEY_ST_SENS, &u8tmp) == ESP_OK)
@@ -1172,114 +1176,111 @@ static void shs_on_ld2450_target_update(const ld2450_target_t *targets, uint8_t 
  * Both binary and analog use explicit reports for reliability
  * IMPORTANT: Local state is only updated AFTER successful Zigbee report to prevent desync
  */
+/* ============================================================================
+ * ZONE OCCUPANCY HOLD-OFF
+ * ============================================================================
+ *
+ * The LD2450 loses a stationary target for a frame or two fairly often, which
+ * made zoneN_occupied strobe where occupancy_ld2410 stays steady - the LD2410
+ * path has had cooldowns from the start, the zone path had nothing. This holds
+ * a zone occupied for shs_zone_occupancy_delay_sec after its last target
+ * leaves; a target returning inside that window cancels the pending clear.
+ *
+ * Target counts are deliberately NOT held: "how many targets are in this zone"
+ * should read true at the instant it is asked.
+ */
+
+static const uint8_t shs_zone_occ_ep[SHS_ZONE_COUNT] = {
+    SHS_EP_LD2450_ZONE1, SHS_EP_LD2450_ZONE2, SHS_EP_LD2450_ZONE3,
+    SHS_EP_LD2450_ZONE4, SHS_EP_LD2450_ZONE5,
+};
+static const uint8_t shs_zone_cnt_ep[SHS_ZONE_COUNT] = {
+    SHS_EP_ZONE1_TARGETS, SHS_EP_ZONE2_TARGETS, SHS_EP_ZONE3_TARGETS,
+    SHS_EP_ZONE4_TARGETS, SHS_EP_ZONE5_TARGETS,
+};
+static bool *const shs_zone_occ_state[SHS_ZONE_COUNT] = {
+    &shs_zone1_occupied, &shs_zone2_occupied, &shs_zone3_occupied,
+    &shs_zone4_occupied, &shs_zone5_occupied,
+};
+static uint8_t *const shs_zone_cnt_state[SHS_ZONE_COUNT] = {
+    &shs_zone1_targets, &shs_zone2_targets, &shs_zone3_targets,
+    &shs_zone4_targets, &shs_zone5_targets,
+};
+
+/* Last raw reading from the sensor, and when a pending clear falls due. */
+static bool     shs_zone_raw_occupied[SHS_ZONE_COUNT] = {false};
+static uint32_t shs_zone_clear_deadline[SHS_ZONE_COUNT] = {0};
+
+/* Publish one zone's occupancy; local state only advances if the report lands. */
+static void shs_zone_publish_occ(int i, bool value) {
+    if (shs_zb_set_binary_value(shs_zone_occ_ep[i], value) &&
+        shs_zb_report_binary_attr(shs_zone_occ_ep[i])) {
+        *shs_zone_occ_state[i] = value;
+        ESP_LOGI(SHS_TAG, "Zone %d: %s", i + 1, value ? "OCCUPIED" : "CLEAR");
+    } else if (shs_zb_ready) {
+        ESP_LOGW(SHS_TAG, "Zone %d occupancy report FAILED - will retry", i + 1);
+    }
+}
+
 static void shs_on_ld2450_zone_update(const ld2450_zone_t *zones, bool occupancy) {
-    /* Update zone 1 occupancy - only update local state if report succeeds */
-    if (zones[0].enabled && shs_zone1_occupied != zones[0].occupied) {
-        if (shs_zb_set_binary_value(SHS_EP_LD2450_ZONE1, zones[0].occupied) &&
-            shs_zb_report_binary_attr(SHS_EP_LD2450_ZONE1)) {
-            shs_zone1_occupied = zones[0].occupied;
-            ESP_LOGI(SHS_TAG, "Zone 1: %s", zones[0].occupied ? "OCCUPIED" : "CLEAR");
-        } else if (shs_zb_ready) {
-            ESP_LOGW(SHS_TAG, "Zone 1 occupancy report FAILED - will retry");
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+
+    for (int i = 0; i < SHS_ZONE_COUNT; i++) {
+        if (!zones[i].enabled) continue;
+
+        bool raw = zones[i].occupied;
+        shs_zone_raw_occupied[i] = raw;
+
+        if (raw) {
+            /* A target is present: report immediately and drop any pending clear. */
+            shs_zone_clear_deadline[i] = 0;
+            if (*shs_zone_occ_state[i] != true) {
+                shs_zone_publish_occ(i, true);
+            }
+        } else if (*shs_zone_occ_state[i]) {
+            /* Just went empty. Clear now, or arm the hold-off and let
+             * shs_zone_holdoff_check() clear it when the delay expires. */
+            if (shs_zone_occupancy_delay_sec == 0) {
+                shs_zone_publish_occ(i, false);
+            } else if (shs_zone_clear_deadline[i] == 0) {
+                shs_zone_clear_deadline[i] = now + (shs_zone_occupancy_delay_sec * 1000);
+                ESP_LOGD(SHS_TAG, "Zone %d empty - holding for %us", i + 1,
+                         (unsigned)shs_zone_occupancy_delay_sec);
+            }
+        }
+
+        /* Target count is always the live value. */
+        if (*shs_zone_cnt_state[i] != zones[i].target_count) {
+            if (shs_zb_set_analog_value(shs_zone_cnt_ep[i], (float)zones[i].target_count) &&
+                shs_zb_report_analog_attr(shs_zone_cnt_ep[i])) {
+                *shs_zone_cnt_state[i] = zones[i].target_count;
+                ESP_LOGI(SHS_TAG, "Zone %d targets: %d", i + 1, *shs_zone_cnt_state[i]);
+            } else if (shs_zb_ready) {
+                ESP_LOGW(SHS_TAG, "Zone %d targets report FAILED - will retry", i + 1);
+            }
         }
     }
+}
 
-    /* Update zone 1 target count - only update local state if report succeeds */
-    if (zones[0].enabled && shs_zone1_targets != zones[0].target_count) {
-        if (shs_zb_set_analog_value(SHS_EP_ZONE1_TARGETS, (float)zones[0].target_count) &&
-            shs_zb_report_analog_attr(SHS_EP_ZONE1_TARGETS)) {
-            shs_zone1_targets = zones[0].target_count;
-            ESP_LOGI(SHS_TAG, "Zone 1 targets: %d", shs_zone1_targets);
-        } else if (shs_zb_ready) {
-            ESP_LOGW(SHS_TAG, "Zone 1 targets report FAILED - will retry");
+/* Called from the LD2450 task loop. The sensor callback only fires when the
+ * sensor's own state changes, so an expiring hold-off has nothing to ride on -
+ * it needs its own tick to publish the delayed clear. */
+static void shs_zone_holdoff_check(void) {
+    if (shs_zone_occupancy_delay_sec == 0) return;
+
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+
+    for (int i = 0; i < SHS_ZONE_COUNT; i++) {
+        if (shs_zone_clear_deadline[i] == 0) continue;
+        if (shs_zone_raw_occupied[i]) {          /* target came back */
+            shs_zone_clear_deadline[i] = 0;
+            continue;
         }
-    }
-
-    /* Update zone 2 occupancy */
-    if (zones[1].enabled && shs_zone2_occupied != zones[1].occupied) {
-        if (shs_zb_set_binary_value(SHS_EP_LD2450_ZONE2, zones[1].occupied) &&
-            shs_zb_report_binary_attr(SHS_EP_LD2450_ZONE2)) {
-            shs_zone2_occupied = zones[1].occupied;
-            ESP_LOGI(SHS_TAG, "Zone 2: %s", zones[1].occupied ? "OCCUPIED" : "CLEAR");
-        } else if (shs_zb_ready) {
-            ESP_LOGW(SHS_TAG, "Zone 2 occupancy report FAILED - will retry");
-        }
-    }
-
-    /* Update zone 2 target count */
-    if (zones[1].enabled && shs_zone2_targets != zones[1].target_count) {
-        if (shs_zb_set_analog_value(SHS_EP_ZONE2_TARGETS, (float)zones[1].target_count) &&
-            shs_zb_report_analog_attr(SHS_EP_ZONE2_TARGETS)) {
-            shs_zone2_targets = zones[1].target_count;
-            ESP_LOGI(SHS_TAG, "Zone 2 targets: %d", shs_zone2_targets);
-        } else if (shs_zb_ready) {
-            ESP_LOGW(SHS_TAG, "Zone 2 targets report FAILED - will retry");
-        }
-    }
-
-    /* Update zone 3 occupancy */
-    if (zones[2].enabled && shs_zone3_occupied != zones[2].occupied) {
-        if (shs_zb_set_binary_value(SHS_EP_LD2450_ZONE3, zones[2].occupied) &&
-            shs_zb_report_binary_attr(SHS_EP_LD2450_ZONE3)) {
-            shs_zone3_occupied = zones[2].occupied;
-            ESP_LOGI(SHS_TAG, "Zone 3: %s", zones[2].occupied ? "OCCUPIED" : "CLEAR");
-        } else if (shs_zb_ready) {
-            ESP_LOGW(SHS_TAG, "Zone 3 occupancy report FAILED - will retry");
-        }
-    }
-
-    /* Update zone 3 target count */
-    if (zones[2].enabled && shs_zone3_targets != zones[2].target_count) {
-        if (shs_zb_set_analog_value(SHS_EP_ZONE3_TARGETS, (float)zones[2].target_count) &&
-            shs_zb_report_analog_attr(SHS_EP_ZONE3_TARGETS)) {
-            shs_zone3_targets = zones[2].target_count;
-            ESP_LOGI(SHS_TAG, "Zone 3 targets: %d", shs_zone3_targets);
-        } else if (shs_zb_ready) {
-            ESP_LOGW(SHS_TAG, "Zone 3 targets report FAILED - will retry");
-        }
-    }
-
-    /* Update zone 4 occupancy */
-    if (zones[3].enabled && shs_zone4_occupied != zones[3].occupied) {
-        if (shs_zb_set_binary_value(SHS_EP_LD2450_ZONE4, zones[3].occupied) &&
-            shs_zb_report_binary_attr(SHS_EP_LD2450_ZONE4)) {
-            shs_zone4_occupied = zones[3].occupied;
-            ESP_LOGI(SHS_TAG, "Zone 4: %s", zones[3].occupied ? "OCCUPIED" : "CLEAR");
-        } else if (shs_zb_ready) {
-            ESP_LOGW(SHS_TAG, "Zone 4 occupancy report FAILED - will retry");
-        }
-    }
-
-    /* Update zone 4 target count */
-    if (zones[3].enabled && shs_zone4_targets != zones[3].target_count) {
-        if (shs_zb_set_analog_value(SHS_EP_ZONE4_TARGETS, (float)zones[3].target_count) &&
-            shs_zb_report_analog_attr(SHS_EP_ZONE4_TARGETS)) {
-            shs_zone4_targets = zones[3].target_count;
-            ESP_LOGI(SHS_TAG, "Zone 4 targets: %d", shs_zone4_targets);
-        } else if (shs_zb_ready) {
-            ESP_LOGW(SHS_TAG, "Zone 4 targets report FAILED - will retry");
-        }
-    }
-
-    /* Update zone 5 occupancy */
-    if (zones[4].enabled && shs_zone5_occupied != zones[4].occupied) {
-        if (shs_zb_set_binary_value(SHS_EP_LD2450_ZONE5, zones[4].occupied) &&
-            shs_zb_report_binary_attr(SHS_EP_LD2450_ZONE5)) {
-            shs_zone5_occupied = zones[4].occupied;
-            ESP_LOGI(SHS_TAG, "Zone 5: %s", zones[4].occupied ? "OCCUPIED" : "CLEAR");
-        } else if (shs_zb_ready) {
-            ESP_LOGW(SHS_TAG, "Zone 5 occupancy report FAILED - will retry");
-        }
-    }
-
-    /* Update zone 5 target count */
-    if (zones[4].enabled && shs_zone5_targets != zones[4].target_count) {
-        if (shs_zb_set_analog_value(SHS_EP_ZONE5_TARGETS, (float)zones[4].target_count) &&
-            shs_zb_report_analog_attr(SHS_EP_ZONE5_TARGETS)) {
-            shs_zone5_targets = zones[4].target_count;
-            ESP_LOGI(SHS_TAG, "Zone 5 targets: %d", shs_zone5_targets);
-        } else if (shs_zb_ready) {
-            ESP_LOGW(SHS_TAG, "Zone 5 targets report FAILED - will retry");
+        if (shs_time_reached(now, shs_zone_clear_deadline[i])) {
+            shs_zone_clear_deadline[i] = 0;
+            if (*shs_zone_occ_state[i]) {
+                shs_zone_publish_occ(i, false);
+            }
         }
     }
 }
@@ -1667,6 +1668,13 @@ static esp_err_t shs_zb_attribute_handler(const esp_zb_zcl_set_attr_value_messag
                 shs_zb_set_ou_delay_ep2(v);
                 shs_save_enqueue(SHS_SAVE_IMMEDIATE_U16, (SHS_ATTR_OCC_CLEAR_COOLDOWN << 8));
                 ESP_LOGI(SHS_TAG, "Set Occupancy Cooldown = %us", (unsigned)v);
+                return ESP_OK;
+
+            case SHS_ATTR_ZONE_OCC_DELAY:
+                if (v > SHS_COOLDOWN_MAX_SEC) v = SHS_COOLDOWN_MAX_SEC;
+                shs_zone_occupancy_delay_sec = v;
+                shs_save_enqueue(SHS_SAVE_IMMEDIATE_U16, (SHS_ATTR_ZONE_OCC_DELAY << 8));
+                ESP_LOGI(SHS_TAG, "Set Zone Occupancy Delay = %us", (unsigned)v);
                 return ESP_OK;
 
             case SHS_ATTR_MOVING_SENS_0_10:
@@ -2172,6 +2180,9 @@ static void shs_ld2450_task(void *pvParameters) {
         /* Check if zone config needs to be applied (debounced) */
         shs_zone_cfg_check_pending();
 
+        /* Publish any zone clear whose hold-off has expired */
+        shs_zone_holdoff_check();
+
         /* UART counter disabled in genAnalogInput implementation */
 
         /* Monitor connection state and attempt recovery if needed */
@@ -2552,6 +2563,8 @@ static void shs_zigbee_task(void *pvParameters) {
             ESP_ZB_ZCL_ATTR_TYPE_U16, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, &shs_movement_cooldown_sec);
         esp_zb_custom_cluster_add_custom_attr(cfg_cl, SHS_ATTR_OCC_CLEAR_COOLDOWN,
             ESP_ZB_ZCL_ATTR_TYPE_U16, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, &shs_occupancy_clear_sec);
+        esp_zb_custom_cluster_add_custom_attr(cfg_cl, SHS_ATTR_ZONE_OCC_DELAY,
+            ESP_ZB_ZCL_ATTR_TYPE_U16, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, &shs_zone_occupancy_delay_sec);
         esp_zb_custom_cluster_add_custom_attr(cfg_cl, SHS_ATTR_MOVING_SENS_0_10,
             ESP_ZB_ZCL_ATTR_TYPE_U16, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, &shs_sens_mv_0_10);
         esp_zb_custom_cluster_add_custom_attr(cfg_cl, SHS_ATTR_STATIC_SENS_0_10,
@@ -3235,6 +3248,8 @@ static void shs_save_worker(void *pv) {
                         shs_cfg_save_u16(SHS_NVS_KEY_MV_CD, shs_movement_cooldown_sec);
                     } else if ((m.u16 >> 8) == SHS_ATTR_OCC_CLEAR_COOLDOWN) {
                         shs_cfg_save_u16(SHS_NVS_KEY_OCC_CD, shs_occupancy_clear_sec);
+                    } else if ((m.u16 >> 8) == SHS_ATTR_ZONE_OCC_DELAY) {
+                        shs_cfg_save_u16(SHS_NVS_KEY_ZONE_CD, shs_zone_occupancy_delay_sec);
                     }
                     break;
                 case SHS_SAVE_DEBOUNCE_SENS_MOVE:
