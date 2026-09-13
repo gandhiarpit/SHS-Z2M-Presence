@@ -745,6 +745,8 @@ static void shs_on_state_change(const ld2410_state_t *state) {
         }
         shs_zb_set_bool_attr(SHS_EP_OCC, ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
                             SHS_ATTR_OCC_MOVING_TARGET, shs_moving_state);
+        shs_zb_report_attr(SHS_EP_OCC, ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
+                           SHS_ATTR_OCC_MOVING_TARGET, false);
     }
 
     /* STATIC TARGET with cooldown (uses occupancy_clear_sec) */
@@ -773,6 +775,8 @@ static void shs_on_state_change(const ld2410_state_t *state) {
         }
         shs_zb_set_bool_attr(SHS_EP_OCC, ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
                             SHS_ATTR_OCC_STATIC_TARGET, shs_static_state);
+        shs_zb_report_attr(SHS_EP_OCC, ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
+                           SHS_ATTR_OCC_STATIC_TARGET, false);
     }
 
     /* OCCUPANCY = presence with cooldowns applied */
@@ -782,6 +786,8 @@ static void shs_on_state_change(const ld2410_state_t *state) {
         shs_occupancy_state = presence;
         ESP_LOGI(SHS_TAG, "Occupancy -> %s", presence ? "DETECTED" : "CLEAR");
         shs_zb_set_occ_bitmap(SHS_EP_OCC, presence);
+        shs_zb_report_attr(SHS_EP_OCC, ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
+                           ESP_ZB_ZCL_ATTR_OCCUPANCY_SENSING_OCCUPANCY_ID, false);
     }
 }
 
