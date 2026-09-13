@@ -409,23 +409,26 @@ static void parse_target_frame(const uint8_t *data, int len) {
  * @brief Parse command response frame
  */
 static void parse_command_response(const uint8_t *data, int len) {
-    if (len < 6) return;
+    /* Shortest valid payload is 4 bytes - the end-config ACK is just the
+     * command word and status, with no return data. */
+    if (len < 4) return;
 
-    // Command response structure:
-    // [0-1] = Command word (little-endian)
-    // [2] = Status (0x00 = success, 0x01 = failure)
-    // [3+] = Response data (varies by command)
+    // Command response payload:
+    // [0-1] = ACK command word (command | 0x0100), little-endian
+    // [2-3] = Status (0x0000 = success), little-endian
+    // [4+]  = Return data (varies by command)
 
     uint16_t cmd = data[0] | (data[1] << 8);
-    uint8_t status = data[2];
+    uint16_t status = data[2] | (data[3] << 8);
+    uint16_t ack_cmd = s_expected_cmd | LD2450_ACK_FLAG;
 
-    if (s_waiting_response && cmd == s_expected_cmd) {
+    if (s_waiting_response && cmd == ack_cmd) {
         memcpy(s_response_buffer, data, len < 64 ? len : 64);
         s_response_len = len;
         s_response_received = true;
         s_waiting_response = false;
 
-        ESP_LOGI(TAG, "Command 0x%04X response: %s", cmd, status == 0 ? "OK" : "FAILED");
+        ESP_LOGD(TAG, "ACK 0x%04X: %s", cmd, status == 0 ? "OK" : "FAILED");
     }
 }
 
@@ -503,13 +506,39 @@ void ld2450_process(void) {
                 }
                 reset_frame_parser();
             }
-            // Check for command response (varies by command, minimum 6 bytes)
-            else if (s_frame_buffer[0] == LD2450_CMD_HEADER && s_frame_pos >= 6) {
-                // Simple heuristic: if we have header + reasonable data, parse it
-                if (s_waiting_response) {
-                    parse_command_response(s_frame_buffer + 1, s_frame_pos - 1);
+            /* Command ACK: FD FC FB FA | length (2, LE) | payload | 04 03 02 01.
+             * The header has to be matched in full - 0xFD alone also turns up
+             * inside the target data stream, and treating that as a frame start
+             * is why ACKs were never recognised. */
+            else if (s_frame_buffer[0] == LD2450_CMD_HEADER) {
+                static const uint8_t hdr[] = LD2450_CMD_HEADER_BYTES;
+                static const uint8_t ftr[] = LD2450_CMD_FOOTER_BYTES;
+
+                if (s_frame_pos <= LD2450_CMD_HEADER_LEN &&
+                    s_frame_buffer[s_frame_pos - 1] != hdr[s_frame_pos - 1]) {
+                    reset_frame_parser();
+                    continue;
                 }
-                reset_frame_parser();
+
+                if (s_frame_pos >= LD2450_CMD_HEADER_LEN + 2) {
+                    uint16_t plen = s_frame_buffer[4] | (s_frame_buffer[5] << 8);
+                    int total = LD2450_CMD_HEADER_LEN + 2 + plen + LD2450_CMD_FOOTER_LEN;
+
+                    if (plen == 0 || total > (int)sizeof(s_frame_buffer)) {
+                        ESP_LOGW(TAG, "Implausible ACK length %u", plen);
+                        reset_frame_parser();
+                        continue;
+                    }
+
+                    if (s_frame_pos >= total) {
+                        if (memcmp(&s_frame_buffer[total - LD2450_CMD_FOOTER_LEN], ftr, sizeof(ftr)) == 0) {
+                            parse_command_response(&s_frame_buffer[LD2450_CMD_HEADER_LEN + 2], plen);
+                        } else {
+                            ESP_LOGW(TAG, "Invalid ACK footer");
+                        }
+                        reset_frame_parser();
+                    }
+                }
             }
         }
     }
@@ -523,23 +552,34 @@ void ld2450_process(void) {
  * @brief Send command to sensor and optionally wait for response
  */
 static esp_err_t send_command(uint16_t cmd, const uint8_t *params, int param_len, bool wait_response) {
+    static const uint8_t header[] = LD2450_CMD_HEADER_BYTES;
+    static const uint8_t footer[] = LD2450_CMD_FOOTER_BYTES;
     uint8_t cmd_buf[64];
     int pos = 0;
 
-    // Build command frame
-    cmd_buf[pos++] = LD2450_CMD_HEADER;     // Header
-    cmd_buf[pos++] = LD2450_CMD_FOOTER;     // Footer (appears at start in LD2450)
-    cmd_buf[pos++] = param_len + 2;         // Length (cmd + params)
-    cmd_buf[pos++] = cmd & 0xFF;            // Command low byte
-    cmd_buf[pos++] = (cmd >> 8) & 0xFF;     // Command high byte
+    if (param_len < 0 || param_len > (int)(sizeof(cmd_buf) - sizeof(header) - sizeof(footer) - 4)) {
+        return ESP_ERR_INVALID_ARG;
+    }
 
-    // Add parameters
+    /* FD FC FB FA | length (2, LE) | command word (2, LE) | params | 04 03 02 01 */
+    memcpy(&cmd_buf[pos], header, sizeof(header));
+    pos += sizeof(header);
+
+    uint16_t len = 2 + param_len;           /* command word plus parameters */
+    cmd_buf[pos++] = len & 0xFF;
+    cmd_buf[pos++] = (len >> 8) & 0xFF;
+
+    cmd_buf[pos++] = cmd & 0xFF;
+    cmd_buf[pos++] = (cmd >> 8) & 0xFF;
+
     if (params && param_len > 0) {
         memcpy(&cmd_buf[pos], params, param_len);
         pos += param_len;
     }
 
-    // Write to UART
+    memcpy(&cmd_buf[pos], footer, sizeof(footer));
+    pos += sizeof(footer);
+
     int written = uart_write_bytes(LD2450_UART_NUM, cmd_buf, pos);
     if (written != pos) {
         ESP_LOGE(TAG, "Failed to write command 0x%04X", cmd);
@@ -550,6 +590,10 @@ static esp_err_t send_command(uint16_t cmd, const uint8_t *params, int param_len
         s_waiting_response = true;
         s_expected_cmd = cmd;
         s_response_received = false;
+        s_response_len = 0;
+
+        ESP_LOGD(TAG, "Sent cmd 0x%04X (%d bytes), expecting ACK 0x%04X",
+                 cmd, pos, cmd | LD2450_ACK_FLAG);
 
         // Wait for response (timeout 1 second)
         uint32_t start = esp_timer_get_time() / 1000;
@@ -565,10 +609,13 @@ static esp_err_t send_command(uint16_t cmd, const uint8_t *params, int param_len
             return ESP_ERR_TIMEOUT;
         }
 
-        // Check response status
-        if (s_response_len >= 3 && s_response_buffer[2] != 0) {
-            ESP_LOGW(TAG, "Command 0x%04X failed", cmd);
-            return ESP_FAIL;
+        /* Payload is [0-1] ACK command word, [2-3] status (0 = success, 16-bit LE) */
+        if (s_response_len >= 4) {
+            uint16_t status = s_response_buffer[2] | (s_response_buffer[3] << 8);
+            if (status != 0) {
+                ESP_LOGW(TAG, "Command 0x%04X failed (status 0x%04X)", cmd, status);
+                return ESP_FAIL;
+            }
         }
     }
 
@@ -723,18 +770,20 @@ esp_err_t ld2450_apply_zones(void) {
  */
 esp_err_t ld2450_read_firmware_version(void) {
     esp_err_t ret = send_command(LD2450_CMD_READ_VERSION, NULL, 0, true);
-    if (ret == ESP_OK && s_response_len >= 8) {
-        s_state.firmware.type = s_response_buffer[3];
-        s_state.firmware.major = s_response_buffer[4];
-        s_state.firmware.minor = s_response_buffer[5];
-        s_state.firmware.build = s_response_buffer[6] |
-                                (s_response_buffer[7] << 8);
+    /* Payload: [0-1] ACK cmd, [2-3] status, [4-5] type, [6-7] version, [8-11] build.
+     * Same layout the LD2410 driver uses, which prints a correct version string. */
+    if (ret == ESP_OK && s_response_len >= 12) {
+        s_state.firmware.type  = s_response_buffer[4];  /* field is uint8_t; [5] is the unused high byte */
+        s_state.firmware.major = s_response_buffer[7];
+        s_state.firmware.minor = s_response_buffer[6];
+        s_state.firmware.build = s_response_buffer[8] |
+                                (s_response_buffer[9] << 8) |
+                                (s_response_buffer[10] << 16) |
+                                ((uint32_t)s_response_buffer[11] << 24);
         s_state.firmware.valid = true;
 
-        ESP_LOGI(TAG, "Firmware: Type=%02X V%d.%02d Build=%lu",
-                 s_state.firmware.type,
-                 s_state.firmware.major,
-                 s_state.firmware.minor,
+        ESP_LOGI(TAG, "Firmware: V%d.%02d.%08lX",
+                 s_state.firmware.major, s_state.firmware.minor,
                  (unsigned long)s_state.firmware.build);
     }
     return ret;

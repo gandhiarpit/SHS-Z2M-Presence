@@ -59,9 +59,16 @@ extern "C" {
 #define LD2450_FRAME_FOOTER_ALT     0x00  /* Alternative footer (some firmware versions) */
 #define LD2450_FRAME_CHECK          0x00
 
-/* Command frame markers */
-#define LD2450_CMD_HEADER           0xFD
-#define LD2450_CMD_FOOTER           0x04
+/* Command frame markers. Hi-Link command frames are
+ *   FD FC FB FA | length (2, little-endian) | command word (2, LE) | params | 04 03 02 01
+ * The *_B0 values are just the first byte, used to spot a candidate frame. */
+#define LD2450_CMD_HEADER           0xFD  /* first header byte */
+#define LD2450_CMD_FOOTER           0x04  /* first footer byte */
+#define LD2450_CMD_HEADER_BYTES     {0xFD, 0xFC, 0xFB, 0xFA}
+#define LD2450_CMD_FOOTER_BYTES     {0x04, 0x03, 0x02, 0x01}
+#define LD2450_CMD_HEADER_LEN       4
+#define LD2450_CMD_FOOTER_LEN       4
+#define LD2450_ACK_FLAG             0x0100  /* ACK command word = command | this */
 
 /* Command words */
 #define LD2450_CMD_ENABLE_CONFIG    0x00FF
