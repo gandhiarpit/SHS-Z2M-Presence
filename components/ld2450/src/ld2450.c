@@ -829,7 +829,16 @@ esp_err_t ld2450_apply_zones(void) {
  * @brief Read firmware version
  */
 esp_err_t ld2450_read_firmware_version(void) {
-    esp_err_t ret = send_command(LD2450_CMD_READ_VERSION, NULL, 0, true);
+    /* The version read is only valid inside config mode - issuing it against a
+     * streaming sensor is why it timed out even once the frame format was right. */
+    esp_err_t ret = enter_config_mode();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Cannot read version: config mode unavailable");
+        exit_config_mode();
+        return ret;
+    }
+
+    ret = send_command(LD2450_CMD_READ_VERSION, NULL, 0, true);
     /* Payload: [0-1] ACK cmd, [2-3] status, [4-5] type, [6-7] version, [8-11] build.
      * Same layout the LD2410 driver uses, which prints a correct version string. */
     if (ret == ESP_OK && s_response_len >= 12) {
@@ -846,6 +855,7 @@ esp_err_t ld2450_read_firmware_version(void) {
                  s_state.firmware.major, s_state.firmware.minor,
                  (unsigned long)s_state.firmware.build);
     }
+    exit_config_mode();
     return ret;
 }
 
