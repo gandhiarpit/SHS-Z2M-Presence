@@ -67,11 +67,14 @@ level shifting is needed. Pin assignments are substitutions and can be moved.
 
 ### Light sensor
 
-Selected at compile time by a substitution (`bh1750` or `ltr390`). Both blocks live
-in the file; only the chosen one compiles. ESPHome declares I2C devices statically,
-so it cannot probe and pick at boot the way the C firmware's `light_sensor` facade
-does. Declaring both and letting one fail was rejected: it leaves a permanent error
-in the logs and a dead entity in Home Assistant.
+Chosen at build time. ESPHome declares I2C devices statically and has no
+conditional YAML, so it cannot probe and pick at boot the way the C firmware's
+`light_sensor` facade does. Declaring both and letting one fail was rejected: it
+leaves a permanent error in the logs and a dead entity in Home Assistant.
+
+The choice is therefore which of two top-level configs you build. Each is a short
+`packages:` list over a shared base, differing only in the light package it pulls
+in, and CI compiles both - so the variant you are not using cannot rot unnoticed.
 
 ## Software
 
@@ -88,14 +91,19 @@ All official, no external dependencies:
 ### Entity model
 
 Raw component outputs are marked `internal: true`. Home Assistant sees only derived
-entities, with one deliberate exception: the raw LD2410 and LD2450 presence sensors
-are exposed as diagnostic entities.
+entities, with two deliberate exceptions: the raw LD2410 and LD2450 presence
+sensors, and the LD2410 distance and energy readings, are exposed as diagnostic
+entities.
 
 That exception matters. In the Zigbee firmware, cross-validation happens *before*
 reporting, so when the LD2410 misbehaves there is no way to see what it actually
 said. Here suppression is a derived sensor sitting on top of visible inputs, which
 makes the same class of problem diagnosable from Home Assistant instead of a serial
 console.
+
+The distances and energies are exposed for a narrower reason: they are the values
+the near-field and still-energy thresholds are compared against. A threshold you
+cannot watch is a threshold you cannot set.
 
 Exposed: `Occupancy`, `Moving target`, `Still target`, `Target count`, three zones
 with occupancy and target counts, `Illuminance`, and `UV index` when fitted.
@@ -141,7 +149,7 @@ Mapping of every mechanism in the firmware:
 | `zone_occupancy_delay` | templated `delayed_off` on the zone binary sensor |
 | Gate-0 rejection (the disabled `#if 0` block) | lambda on `moving_distance` / `still_distance` |
 | `min_moving_energy`, `min_static_energy` | lambda on `moving_energy` / `still_energy` |
-| Interference zones (zone type 3) | native zone `Filter` mode |
+| Interference zones (zone type 3) | native `zone_type: Filter`, all zones or none |
 
 Two consequences worth stating. The `delayed_off` filter replaces the firmware's
 cooldown timers *and* the zone reconciliation added in v1.1.1 - ESPHome owns that
@@ -159,8 +167,10 @@ two sources for them.
 **From the radar components, at no cost.** The `ld2410` component exposes
 `timeout`, `light_threshold`, the max move and still distance gates, and a
 move/still threshold pair for each of gates 0-8. The `ld2450` component exposes
-`presence_timeout`, and per zone a `zone_type` select (Disabled / Detection /
-Filter) and the four corner coordinates. These write through to the radar's own
+`presence_timeout`, the four corner coordinates of each of the three zones, and a
+single `zone_type` select (Disabled / Detection / Filter) that applies to all three
+at once - the radar has one region-filtering mode, not one per region. These write
+through to the radar's own
 flash, so they survive a reboot of either the radar or the C3, and zone geometry
 becomes a slider in Home Assistant rather than a byte sequence over UART.
 
@@ -227,8 +237,17 @@ facts, not tuning.
 
 ```
 esphome/
-  shs-presence-c3.yaml     the config
-  README.md                wiring, flashing, and tuning for this variant
+  shs-presence-c3-bh1750.yaml   build this one for a BH1750
+  shs-presence-c3-ltr390.yaml   build this one for an LTR390
+  packages/
+    base.yaml                   board, WiFi, API, OTA, logger, pin substitutions
+    radars.yaml                 both UARTs, both radars, their entities
+    tuning.yaml                 the template numbers
+    occupancy.yaml              the derived occupancy and zone sensors
+    light-bh1750.yaml
+    light-ltr390.yaml
+  secrets.yaml.example
+  README.md                     wiring, flashing, and tuning for this variant
 ```
 
 The top-level README gains a section stating that two firmwares exist, with a
@@ -252,6 +271,9 @@ There is no test framework and none is proposed. Verification is:
 
 1. `esphome config` - validates the YAML and substitutions.
 2. `esphome compile` - proves it builds for the C3.
+
+Both run over both top-level configs as a matrix, so the BH1750 and LTR390 variants
+are always known to build.
 
 Both run in GitHub Actions as a job alongside the existing firmware build, so the
 variant cannot silently rot when ESPHome releases a breaking change. This mirrors
