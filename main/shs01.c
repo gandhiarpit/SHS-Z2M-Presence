@@ -919,6 +919,7 @@ static uint16_t shs_last_reported_lux_zcl = 0xFFFF;  /* force the first report *
  * Reported as a plain float on genAnalogInput, same shape as the target counts. */
 #define SHS_UV_REPORT_CHANGE       0.1f     /* UV index units */
 #define SHS_LUX_MAX_READ_FAILURES  10       /* consecutive failures before re-detecting */
+#define SHS_ZONE_SYNC_INTERVAL_MS  2000     /* zone state reconciliation period */
 static float shs_uv_index = 0.0f;
 static float shs_last_reported_uv = -1.0f;  /* force the first report */
 
@@ -1274,7 +1275,7 @@ static void shs_on_ld2450_zone_update(const ld2450_zone_t *zones, bool occupancy
             }
         } else if (*shs_zone_occ_state[i]) {
             /* Just went empty. Clear now, or arm the hold-off and let
-             * shs_zone_holdoff_check() clear it when the delay expires. */
+             * shs_zone_sync() clear it when the delay expires. */
             if (shs_zone_occupancy_delay_sec == 0) {
                 shs_zone_publish_occ(i, false);
             } else if (shs_zone_clear_deadline[i] == 0) {
@@ -1297,25 +1298,35 @@ static void shs_on_ld2450_zone_update(const ld2450_zone_t *zones, bool occupancy
     }
 }
 
-/* Called from the LD2450 task loop. The sensor callback only fires when the
- * sensor's own state changes, so an expiring hold-off has nothing to ride on -
- * it needs its own tick to publish the delayed clear. */
-static void shs_zone_holdoff_check(void) {
-    if (shs_zone_occupancy_delay_sec == 0) return;
-
+/* Reconcile what we have published against what the sensor actually says.
+ *
+ * Two things make this necessary rather than nice to have:
+ *  - The driver fires the zone callback only when ITS state changes, while
+ *    our local state only advances on a successful Zigbee publish. A single
+ *    failed report therefore desynchronised the two permanently: the zone
+ *    would sit at its stale value forever because the callback never fired
+ *    for it again. The old "will retry" log was a lie - nothing retried.
+ *  - An expiring hold-off has no sensor-side event to ride on.
+ *
+ * Rate limited, and only publishes on a genuine mismatch, so a healthy zone
+ * costs a comparison every couple of seconds. */
+static void shs_zone_sync(void) {
+    static uint32_t last_sync = 0;
     uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
 
+    if (last_sync != 0 && (now - last_sync) < SHS_ZONE_SYNC_INTERVAL_MS) return;
+    last_sync = now;
+
     for (int i = 0; i < SHS_ZONE_COUNT; i++) {
-        if (shs_zone_clear_deadline[i] == 0) continue;
-        if (shs_zone_raw_occupied[i]) {          /* target came back */
+        /* Retire a hold-off once the target is back, or the delay has run out. */
+        if (shs_zone_clear_deadline[i] != 0 &&
+            (shs_zone_raw_occupied[i] || shs_time_reached(now, shs_zone_clear_deadline[i]))) {
             shs_zone_clear_deadline[i] = 0;
-            continue;
         }
-        if (shs_time_reached(now, shs_zone_clear_deadline[i])) {
-            shs_zone_clear_deadline[i] = 0;
-            if (*shs_zone_occ_state[i]) {
-                shs_zone_publish_occ(i, false);
-            }
+
+        bool desired = shs_zone_raw_occupied[i] || (shs_zone_clear_deadline[i] != 0);
+        if (*shs_zone_occ_state[i] != desired) {
+            shs_zone_publish_occ(i, desired);
         }
     }
 }
@@ -2161,8 +2172,8 @@ static void shs_ld2450_task(void *pvParameters) {
         /* Check if zone config needs to be applied (debounced) */
         shs_zone_cfg_check_pending();
 
-        /* Publish any zone clear whose hold-off has expired */
-        shs_zone_holdoff_check();
+        /* Re-publish any zone whose reported state drifted from reality */
+        shs_zone_sync();
 
         /* UART counter disabled in genAnalogInput implementation */
 
