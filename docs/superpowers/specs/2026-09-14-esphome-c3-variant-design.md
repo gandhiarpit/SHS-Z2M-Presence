@@ -34,7 +34,6 @@ as a **second variant alongside** the Zigbee firmware, not as a replacement.
 - Zigbee, or a Zigbee router role. The ESP32-C3 has no 802.15.4 radio, so this is
   physically impossible on that part and is not a trade-off being made.
 - Five zones. The official ESPHome `ld2450` component supports three.
-- A runtime configuration surface equivalent to the Zigbee config cluster.
 - UV index, unless the LTR390 is the chosen light sensor.
 
 ## Hardware
@@ -101,6 +100,10 @@ console.
 Exposed: `Occupancy`, `Moving target`, `Still target`, `Target count`, three zones
 with occupancy and target counts, `Illuminance`, and `UV index` when fitted.
 
+Alongside those sit the configuration entities described under Runtime
+configuration, all in the `config` entity category so Home Assistant files them
+apart from the readings.
+
 ### Cross-validation and false-positive rejection
 
 The Zigbee firmware suppresses LD2410 detections when the LD2450 sees no targets:
@@ -116,25 +119,26 @@ The ESPHome equivalent is a template binary sensor:
   name: "Occupancy"
   lambda: |-
     if (!id(ld2450_target).state) return false;
-    if (id(ld2410_moving).state && id(ld2410_moving_distance).state < NEAR_FIELD_CM) return false;
-    if (id(ld2410_still).state  && id(ld2410_still_distance).state  < NEAR_FIELD_CM) return false;
-    if (id(ld2410_still).state  && id(ld2410_still_energy).state    < MIN_STILL_ENERGY) return false;
+    float near = id(near_field_cm).state;
+    if (near > 0 && id(ld2410_moving).state && id(ld2410_moving_distance).state < near) return false;
+    if (near > 0 && id(ld2410_still).state  && id(ld2410_still_distance).state  < near) return false;
+    if (id(ld2410_still).state && id(ld2410_still_energy).state < id(min_still_energy).state) return false;
     return id(ld2410_target).state;
   filters:
-    - delayed_on: SPIKE_FILTER
-    - delayed_off: OCCUPANCY_CLEAR_DELAY
+    - delayed_on: !lambda "return id(spike_filter).state * 1000;"
+    - delayed_off: !lambda "return id(occupancy_clear_delay).state * 1000;"
 ```
 
-The capitalised names are substitutions, written in the real file as ESPHome
-substitution references.
+Every threshold and delay in that block is a Home Assistant entity, not a
+compile-time constant. See Runtime configuration below.
 
 Mapping of every mechanism in the firmware:
 
 | Zigbee firmware | ESPHome |
 |---|---|
 | LD2450 cross-validation in `shs_on_state_change` | lambda over both `has_target` sensors |
-| `moving_cooldown`, `occupancy_delay` | `delayed_off` filter |
-| `zone_occupancy_delay` | `delayed_off` on the zone binary sensor |
+| `moving_cooldown`, `occupancy_delay` | templated `delayed_off` filter |
+| `zone_occupancy_delay` | templated `delayed_off` on the zone binary sensor |
 | Gate-0 rejection (the disabled `#if 0` block) | lambda on `moving_distance` / `still_distance` |
 | `min_moving_energy`, `min_static_energy` | lambda on `moving_energy` / `still_energy` |
 | Interference zones (zone type 3) | native zone `Filter` mode |
@@ -143,18 +147,81 @@ Two consequences worth stating. The `delayed_off` filter replaces the firmware's
 cooldown timers *and* the zone reconciliation added in v1.1.1 - ESPHome owns that
 state machine, so the class of bug where a dropped report desynchronises local and
 published state does not exist. And the gate-0 and energy filters, which are compiled
-out behind `#if 0` in the firmware, are live here and tunable.
+out behind `#if 0` in the firmware, are live here and adjustable from Home
+Assistant, defaulting to off so behaviour matches the firmware until they are
+turned on.
 
-### Tuning
+### Runtime configuration
 
-Substitutions at the top of the file: `occupancy_clear_delay`, `spike_filter`,
-`near_field_cm`, `min_still_energy`, plus the pins and the light sensor choice.
-Changing one means editing a line and pushing OTA - roughly 30 seconds, no cable.
+Every tunable is a Home Assistant entity, adjustable without a reflash. There are
+two sources for them.
 
-Deliberately not a runtime configuration surface. `delayed_off` is compile-time in
-ESPHome, and making delays adjustable at runtime requires scripts and globals. The
-Zigbee build's runtime config cluster is the feature that has cost the most debugging
-time in this project; reproducing it here would be copying a liability.
+**From the radar components, at no cost.** The `ld2410` component exposes
+`timeout`, `light_threshold`, the max move and still distance gates, and a
+move/still threshold pair for each of gates 0-8. The `ld2450` component exposes
+`presence_timeout`, and per zone a `zone_type` select (Disabled / Detection /
+Filter) and the four corner coordinates. These write through to the radar's own
+flash, so they survive a reboot of either the radar or the C3, and zone geometry
+becomes a slider in Home Assistant rather than a byte sequence over UART.
+
+**For the derived sensors, template numbers.** `optimistic: true` makes the
+entity authoritative, `restore_value: true` persists it to the C3's flash:
+
+```yaml
+number:
+  - platform: template
+    id: occupancy_clear_delay
+    name: "Occupancy clear delay"
+    optimistic: true
+    restore_value: true
+    initial_value: 15
+    min_value: 0
+    max_value: 300
+    step: 1
+    unit_of_measurement: s
+    mode: box
+    entity_category: config
+```
+
+The delays reach the filters because `delayed_on`, `delayed_off` and
+`delayed_on_off` are templatable - each takes a lambda returning milliseconds:
+
+```yaml
+filters:
+  - delayed_on: !lambda "return id(spike_filter).state * 1000;"
+  - delayed_off: !lambda "return id(occupancy_clear_delay).state * 1000;"
+```
+
+The thresholds need no templating at all. The occupancy lambda already re-runs on
+every input change, so it reads `id(near_field_cm).state` directly.
+
+The full set:
+
+| Entity | Default | Equivalent in the Zigbee build |
+|---|---|---|
+| Occupancy clear delay | 15s | `occupancy_delay`, `moving_cooldown` |
+| Spike filter | 0.5s | debounce on the ON edge |
+| Zone clear delay | 0s | `zone_occupancy_delay` |
+| Near-field reject | 0cm (off) | gate-0 rejection |
+| Minimum still energy | 0 (off) | `min_static_energy` |
+
+Two behaviours to know. A templated filter evaluates its lambda when the timer
+*starts*, not continuously, so changing a delay while one is already pending takes
+effect on the next transition rather than the current one. And `restore_value`
+writes to flash on each change, which suits a knob turned occasionally and would
+not suit a value changing every few seconds.
+
+This is the part of the Zigbee build that cost the most debugging time, and it is
+worth being clear about why copying it here is not the same bet. The cost there
+was never the concept of adjustable settings; it was the transport - attributes
+that did not populate until Zigbee2MQTT ran Configure, values that silently
+desynchronised from the device after a factory reset, a custom cluster needing
+converter code on both sides. ESPHome's number entities are part of the same API
+connection as the sensors, so they cannot be configured-but-not-reporting, and
+state lives in one place. The liability was the plumbing, not the feature.
+
+Pins and the light sensor choice stay compile-time substitutions. They are wiring
+facts, not tuning.
 
 ## Repository layout
 
@@ -176,7 +243,7 @@ comparison table and guidance on which to pick.
 | Zones | 5 | 3 |
 | Light sensor | BH1750 or LTR390, auto-detected | one, chosen at compile time |
 | UV index | yes, with LTR390 | yes, with LTR390 |
-| Runtime config | config cluster attributes | compile-time substitutions + OTA |
+| Runtime config | config cluster attributes | number/select/switch entities in HA |
 | Custom code | ~7300 lines of C and headers | none |
 
 ## Verification
