@@ -27,35 +27,6 @@ For the best experience, install the **SHS Z2M Presence Zone Configurator** add-
 
 ---
 
-## Community
-
-I wanted to thank both **u/otherworld-dev** and **Rune** from [runesblog.com](https://runesblog.com) for their amazing contributions to this project. It's been incredible to see people work together on this, and also the support this project has received from the community.
-
-### Custom PCB — by u/otherworld-dev
-
-After discovering this project on r/homeassistant, u/otherworld-dev designed a custom PCB that integrates the ESP32-C6, LD2410C, and LD2450 into a single clean board — no breadboard or loose wiring required.
-
-> ⚠️ **The PCB is only compatible with the [ESP32-C6-DevKitC-1-N8](https://eu.mouser.com/ProductDetail/Espressif-Systems/ESP32-C6-DevKitC-1-N8).** Other ESP32-C6 boards will not work as the pins won't align properly with the PCB.
-
-| | |
-|---|---|
-| ![PCB Front](docs/SHS_PCB_front.JPG) | ![PCB Back](docs/SHS_PCB_%20back.JPG) |
-
-**[Order the PCB on PCBWay →](https://www.pcbway.com/project/shareproject/SHS_Z2M_Presence_ESP_32_439c9c21.html)**
-
-### 3D Printed Case — by Rune (runesblog.com)
-
-I came across [Rune's work](https://www.facebook.com/groups/HomeAssistant/permalink/4289785924626078/) in the Home Assistant Facebook group a few months back. He'd been designing enclosures for ESP boards which I loved. I reached out, and he was kind enough to design a case specifically for this project. Please make sure to check his work at [runesblog.com](https://runesblog.com).
-
-| | |
-|---|---|
-| ![Case parts](docs/SHS_case1.webp) | ![Case assembly](docs/SHS_case2.webp) |
-| ![Case installed](docs/SHS_case3.webp) | ![Case in room](docs/SHS_case4.webp) |
-
-**[Download the 3D model on MakerWorld →](https://makerworld.com/en/models/2959145-shs-z2m-presence-adjustable-case-mount#profileId-3316652)**
-
----
-
 ## Hardware Requirements
 
 | Component | Purpose |
