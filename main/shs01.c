@@ -1244,7 +1244,24 @@ static void shs_on_ld2450_zone_update(const ld2450_zone_t *zones, bool occupancy
     uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
 
     for (int i = 0; i < SHS_ZONE_COUNT; i++) {
-        if (!zones[i].enabled) continue;
+        /* A disabled zone is definitively not occupied. Skipping it entirely
+         * meant a zone that had reported occupied and was then disabled never
+         * published anything again, so Zigbee2MQTT kept republishing the stale
+         * true indefinitely. Say false once instead. */
+        if (!zones[i].enabled) {
+            shs_zone_raw_occupied[i] = false;
+            shs_zone_clear_deadline[i] = 0;
+            if (*shs_zone_occ_state[i]) {
+                shs_zone_publish_occ(i, false);
+            }
+            if (*shs_zone_cnt_state[i] != 0) {
+                if (shs_zb_set_analog_value(shs_zone_cnt_ep[i], 0.0f) &&
+                    shs_zb_report_analog_attr(shs_zone_cnt_ep[i])) {
+                    *shs_zone_cnt_state[i] = 0;
+                }
+            }
+            continue;
+        }
 
         bool raw = zones[i].occupied;
         shs_zone_raw_occupied[i] = raw;
