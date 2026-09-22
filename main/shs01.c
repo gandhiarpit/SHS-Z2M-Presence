@@ -698,8 +698,10 @@ static void shs_on_state_change(const ld2412_state_t *state) {
      */
 #if 0
     /* Gate 0 hard block:
-     * Always ignore detections at gate 0 (< 75cm) - these are PCB/housing reflections.
-     * The LD2412's hardware gate 0 sensitivity setting is unreliable on some firmware.
+     * Ignore detections at gate 0 (< 75cm) - these are PCB/housing reflections.
+     * Superseded on the LD2412: the minimum detection gate (attribute 0x000B,
+     * default gate 1) excludes the near field in hardware, so there is no
+     * reason to re-enable this.
      */
     if (raw_moving && state->target.moving_distance < 75) {
         raw_moving = false;

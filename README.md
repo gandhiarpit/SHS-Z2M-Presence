@@ -26,10 +26,11 @@
 >
 > Two things are new on this branch:
 >
-> - **Minimum detection gate** (`min_distance`). The LD2410 build rejects
->   gate 0 in software because the hardware setting is unreliable; the LD2412
->   does it properly in hardware, so that workaround is gone. Defaults to
->   gate 1.
+> - **Minimum detection gate** (`min_distance`). The LD2410 build carries a
+>   near-field rejection block for this, but it sits behind `#if 0` and has
+>   never actually run - cross-validation against the LD2450 was doing that
+>   work instead. The LD2412 handles it in hardware, and this branch defaults
+>   the minimum to gate 1.
 > - **Dynamic background correction** (`background_correction`). Write it to
 >   have the module learn the fixed clutter in front of it and subtract it.
 >   Leave the area empty while it runs, which takes a few seconds. This is
