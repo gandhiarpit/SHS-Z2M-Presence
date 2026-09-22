@@ -1,5 +1,5 @@
 /**
- * @file shs01_enhanced.js
+ * @file shs01_enhanced.mjs
  * @brief Zigbee2MQTT External Converter for SHS01 Enhanced
  *
  * Features:
@@ -13,13 +13,13 @@
  * - For zone configuration in web app
  * - Disable when not configuring to reduce Zigbee traffic
  *
- * Place this file in: zigbee2mqtt/data/external_converters/shs01_enhanced.js
+ * Place this file in: zigbee2mqtt/data/external_converters/shs01_enhanced.mjs
  */
 
-const fz = require('zigbee-herdsman-converters/converters/fromZigbee');
-const tz = require('zigbee-herdsman-converters/converters/toZigbee');
-const exposes = require('zigbee-herdsman-converters/lib/exposes');
-const reporting = require('zigbee-herdsman-converters/lib/reporting');
+import * as fz from 'zigbee-herdsman-converters/converters/fromZigbee';
+import * as tz from 'zigbee-herdsman-converters/converters/toZigbee';
+import * as exposes from 'zigbee-herdsman-converters/lib/exposes';
+import * as reporting from 'zigbee-herdsman-converters/lib/reporting';
 const e = exposes.presets;
 const ea = exposes.access;
 
@@ -68,8 +68,12 @@ const ATTR_OCCUPANCY_DELAY = 0x0002;
 const ATTR_ZONE_OCC_DELAY = 0x0007;
 const ATTR_MOVING_SENSITIVITY = 0x0003;
 const ATTR_STATIC_SENSITIVITY = 0x0004;
-const ATTR_MOVING_MAX_GATE = 0x0005;
-const ATTR_STATIC_MAX_GATE = 0x0006;
+const ATTR_MAX_GATE = 0x0005;
+// 0x0006 was the LD2410's separate static range. The LD2412 has one
+// detection range with a near edge, so 0x000B carries the min gate instead
+// and 0x0006 is not used by this firmware.
+const ATTR_MIN_GATE = 0x000B;
+const ATTR_BG_CORRECTION = 0x000C;
 const ATTR_POSITION_REPORTING = 0x0008;
 
 // Zone configuration attributes (on Config cluster 0xFDCD)
@@ -174,12 +178,11 @@ function calculateZoneTargets(meta) {
 }
 
 const definition = {
-    // Accept old and new model IDs for compatibility
-    zigbeeModel: ['SHS-Z2M-Presence', 'SHS01', 'SHS01_Enhanced'],
+    // LD2412 build only. The LD2410 firmware keeps SHS-Z2M-Presence and its
+    // own converter, so a device pairs against exactly one of the two.
+    zigbeeModel: ['SHS-Z2M-Presence-2412'],
     fingerprint: [
-        {modelID: 'SHS-Z2M-Presence', manufacturerName: 'SmartHomeScene'},
-        {modelID: 'SHS01', manufacturerName: 'SmartHomeScene'},
-        {modelID: 'SHS01_Enhanced', manufacturerName: 'SmartHomeScene'},
+        {modelID: 'SHS-Z2M-Presence-2412', manufacturerName: 'SmartHomeScene'},
         {
             type: 'router',
             manufacturerName: 'SmartHomeScene',
@@ -193,9 +196,9 @@ const definition = {
             ],
         },
     ],
-    model: 'SHS01_Enhanced',
+    model: 'SHS01_LD2412',
     vendor: 'SmartHomeScene',
-    description: 'Enhanced Dual-Sensor Presence (LD2410C + LD2450) - Standard clusters only',
+    description: 'Enhanced Dual-Sensor Presence (LD2412 + LD2450) - Standard clusters only',
 
     fromZigbee: [
         fz.on_off,
@@ -362,13 +365,13 @@ const definition = {
                 if (msg.data.hasOwnProperty(ATTR_STATIC_SENSITIVITY)) {
                     result.static_sensitivity = msg.data[ATTR_STATIC_SENSITIVITY];
                 }
-                if (msg.data.hasOwnProperty(ATTR_MOVING_MAX_GATE)) {
+                if (msg.data.hasOwnProperty(ATTR_MAX_GATE)) {
                     // Convert gates to meters (1 gate = 0.75m)
-                    result.moving_max_distance = msg.data[ATTR_MOVING_MAX_GATE] * 0.75;
+                    result.max_distance = msg.data[ATTR_MAX_GATE] * 0.75;
                 }
-                if (msg.data.hasOwnProperty(ATTR_STATIC_MAX_GATE)) {
+                if (msg.data.hasOwnProperty(ATTR_MIN_GATE)) {
                     // Convert gates to meters (1 gate = 0.75m)
-                    result.static_max_distance = msg.data[ATTR_STATIC_MAX_GATE] * 0.75;
+                    result.min_distance = msg.data[ATTR_MIN_GATE] * 0.75;
                 }
                 if (msg.data.hasOwnProperty(ATTR_POSITION_REPORTING)) {
                     result.position_reporting = msg.data[ATTR_POSITION_REPORTING] === 1 || msg.data[ATTR_POSITION_REPORTING] === true;
@@ -399,7 +402,8 @@ const definition = {
         {
             key: ['moving_cooldown', 'occupancy_delay', 'zone_occupancy_delay',
                   'moving_sensitivity', 'static_sensitivity',
-                  'moving_max_distance', 'static_max_distance', 'position_reporting'],
+                  'max_distance', 'min_distance', 'position_reporting',
+                  'background_correction'],
             convertSet: async (entity, key, value, meta) => {
                 const endpoint = meta.device.getEndpoint(EP_LIGHT);
                 if (!endpoint) {
@@ -414,23 +418,25 @@ const definition = {
                     'zone_occupancy_delay': {id: ATTR_ZONE_OCC_DELAY, type: 0x21},
                     'moving_sensitivity': {id: ATTR_MOVING_SENSITIVITY, type: 0x21},
                     'static_sensitivity': {id: ATTR_STATIC_SENSITIVITY, type: 0x21},
-                    'moving_max_distance': {id: ATTR_MOVING_MAX_GATE, type: 0x21},
-                    'static_max_distance': {id: ATTR_STATIC_MAX_GATE, type: 0x21},
+                    'max_distance': {id: ATTR_MAX_GATE, type: 0x21},
+                    'min_distance': {id: ATTR_MIN_GATE, type: 0x21},
                     'position_reporting': {id: ATTR_POSITION_REPORTING, type: 0x10},
+                    'background_correction': {id: ATTR_BG_CORRECTION, type: 0x21},
                 };
 
                 const attr = lookup[key];
                 let writeValue = value;
 
                 // Convert meters to gates for distance settings (1 gate = 0.75m)
-                if (key === 'moving_max_distance' || key === 'static_max_distance') {
+                if (key === 'max_distance' || key === 'min_distance') {
+                    // 1 gate = 0.75 m; the LD2412 has gates 0-13
                     writeValue = Math.round(value / 0.75);
-                    // Clamp to valid gate range
-                    if (key === 'moving_max_distance') {
-                        writeValue = Math.max(0, Math.min(8, writeValue));
-                    } else {
-                        writeValue = Math.max(2, Math.min(8, writeValue));
-                    }
+                    writeValue = Math.max(0, Math.min(13, writeValue));
+                }
+
+                // Write-1-to-run trigger; the firmware clears it itself
+                if (key === 'background_correction') {
+                    writeValue = value ? 1 : 0;
                 }
 
                 // Convert boolean to number for position_reporting (Zigbee expects 0/1)
@@ -463,9 +469,10 @@ const definition = {
                     'zone_occupancy_delay': ATTR_ZONE_OCC_DELAY,
                     'moving_sensitivity': ATTR_MOVING_SENSITIVITY,
                     'static_sensitivity': ATTR_STATIC_SENSITIVITY,
-                    'moving_max_distance': ATTR_MOVING_MAX_GATE,
-                    'static_max_distance': ATTR_STATIC_MAX_GATE,
+                    'max_distance': ATTR_MAX_GATE,
+                    'min_distance': ATTR_MIN_GATE,
                     'position_reporting': ATTR_POSITION_REPORTING,
+                    'background_correction': ATTR_BG_CORRECTION,
                 };
 
                 const attrId = lookup[key];
@@ -713,18 +720,20 @@ const definition = {
             .withValueMin(0)
             .withValueMax(10)
             .withDescription('Static target sensitivity, 0-10 (default: 5)'),
-        exposes.numeric('moving_max_distance', ea.ALL)
+        exposes.numeric('max_distance', ea.ALL)
             .withValueMin(0)
-            .withValueMax(6)
+            .withValueMax(9.75)
             .withValueStep(0.75)
             .withUnit('m')
-            .withDescription('Max distance for moving detection, 0-6m (default: 6m)'),
-        exposes.numeric('static_max_distance', ea.ALL)
-            .withValueMin(1.5)
-            .withValueMax(6)
+            .withDescription('Furthest distance considered, 0-9.75m (default: 9.75m)'),
+        exposes.numeric('min_distance', ea.ALL)
+            .withValueMin(0)
+            .withValueMax(9.75)
             .withValueStep(0.75)
             .withUnit('m')
-            .withDescription('Max distance for static detection, 1.5-6m (default: 6m)'),
+            .withDescription('Nearest distance considered; 0.75m keeps housing reflections out (default: 0.75m)'),
+        exposes.binary('background_correction', ea.SET, true, false)
+            .withDescription('Run dynamic background correction. Learns the fixed clutter in front of the sensor and subtracts it. Takes a few seconds; leave the area empty while it runs'),
         exposes.binary('position_reporting', ea.ALL, true, false)
             .withDescription('Enable position reporting for zone configuration; increases Zigbee traffic (default: off)'),
 
@@ -1034,8 +1043,8 @@ const definition = {
                 ATTR_ZONE_OCC_DELAY,
                 ATTR_MOVING_SENSITIVITY,
                 ATTR_STATIC_SENSITIVITY,
-                ATTR_MOVING_MAX_GATE,
-                ATTR_STATIC_MAX_GATE,
+                ATTR_MAX_GATE,
+                ATTR_MIN_GATE,
                 ATTR_POSITION_REPORTING,
             ]);
         } catch (e) {
@@ -1108,4 +1117,4 @@ const definition = {
     },
 };
 
-module.exports = definition;
+export default definition;

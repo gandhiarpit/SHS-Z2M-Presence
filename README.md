@@ -2,6 +2,43 @@
 
 **Dual mmWave Presence Sensor Firmware for ESP32-C6 with Zigbee2MQTT Support**
 
+> ### You are on the `ld2412` branch
+>
+> This branch swaps the LD2410B/C for the **HLK-LD2412**. The `main` branch
+> remains the LD2410 line and is unaffected; a board runs one or the other,
+> never both.
+>
+> | | `main` | `ld2412` |
+> |---|---|---|
+> | Radar | LD2410 / B / C | LD2412 |
+> | UART baud | 256000 | **115200** |
+> | Distance gates | 9 (0-8) | **14 (0-13)** |
+> | Detection range | max moving + max static | **min + max** |
+> | Zigbee model ID | `SHS-Z2M-Presence` | `SHS-Z2M-Presence-2412` |
+> | Converter | `shs01_enhanced.{js,mjs}` | `shs01_ld2412.{js,mjs}` |
+> | Firmware | v1.1.1 | v2.0.0 |
+>
+> **The LD2412 is not a drop-in.** It is a different 6-pin, 20x20mm module
+> (OUT, TX, RX, 5V, 3V3, GND - power it from 5V *or* 3V3, never both), so it
+> needs its own cable and does not fit the LD2410C footprint on the community
+> PCB. In exchange it reaches about 9m across +/-75 degrees rather than ~6m
+> across +/-60, and it detects stationary people more reliably.
+>
+> Two things are new on this branch:
+>
+> - **Minimum detection gate** (`min_distance`). The LD2410 build rejects
+>   gate 0 in software because the hardware setting is unreliable; the LD2412
+>   does it properly in hardware, so that workaround is gone. Defaults to
+>   gate 1.
+> - **Dynamic background correction** (`background_correction`). Write it to
+>   have the module learn the fixed clutter in front of it and subtract it.
+>   Leave the area empty while it runs, which takes a few seconds. This is
+>   worth knowing about if you mount the sensor inside an enclosure with
+>   anything rigid in its near field.
+>
+> Because the model ID differs, Zigbee2MQTT picks the right converter by
+> itself and an already-paired LD2410 device is untouched.
+
 TODO: I will update the readme with relevant details.
 ---
 

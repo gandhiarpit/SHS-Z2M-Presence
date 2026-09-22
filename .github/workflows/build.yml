@@ -51,8 +51,8 @@ jobs:
           cp build/bootloader/bootloader.bin dist/
           cp build/partition_table/partition-table.bin dist/
           cp build/SHS_Z2M_Presence.bin dist/
-          cp zigbee2mqtt/external_converters/shs01_enhanced.js dist/
-          cp zigbee2mqtt/external_converters/shs01_enhanced.mjs dist/
+          cp zigbee2mqtt/external_converters/shs01_ld2412.js dist/
+          cp zigbee2mqtt/external_converters/shs01_ld2412.mjs dist/
           echo "merged=${NAME}" >> "$GITHUB_OUTPUT"
           ls -l dist/
 
