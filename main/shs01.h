@@ -19,7 +19,7 @@
 
 /* Endpoints */
 #define SHS_EP_LIGHT                    1   /* genOnOff Light + Config Cluster */
-#define SHS_EP_OCC                      2   /* Occupancy Sensing + Distance (LD2410C) */
+#define SHS_EP_OCC                      2   /* Occupancy Sensing + Distance (LD2412) */
 
 /* LD2450 endpoints (standard clusters only - no flooding) */
 #define SHS_EP_LD2450_OCC               3   /* LD2450 Occupancy (msOccupancySensing) */
@@ -41,9 +41,9 @@
 #define SHS_EP_LD2450_T3_Y              15  /* Target 3 Y coordinate in mm (genAnalogInput) */
 #define SHS_EP_LD2450_T3_DIST           16  /* Target 3 Distance in mm (genAnalogInput) */
 
-/* LD2410C target state endpoints (genBinaryInput) - more reliable than mfr-specific attrs */
-#define SHS_EP_LD2410C_MOVING           17  /* Moving target state (genBinaryInput) */
-#define SHS_EP_LD2410C_STATIC           18  /* Static target state (genBinaryInput) */
+/* LD2412 target state endpoints (genBinaryInput) - more reliable than mfr-specific attrs */
+#define SHS_EP_LD2412_MOVING           17  /* Moving target state (genBinaryInput) */
+#define SHS_EP_LD2412_STATIC           18  /* Static target state (genBinaryInput) */
 
 /* Zone target count endpoints (genAnalogInput) - same pattern as EP4 */
 #define SHS_EP_ZONE1_TARGETS            19  /* Zone 1 target count (genAnalogInput) */
@@ -71,14 +71,14 @@
 
 /* Manufacturer / Model strings for Basic cluster */
 #define SHS_MANUFACTURER_NAME           "\x0eSmartHomeScene"
-#define SHS_MODEL_IDENTIFIER            "\x10SHS-Z2M-Presence"
+#define SHS_MODEL_IDENTIFIER            "\x15" "SHS-Z2M-Presence-2412"
 
 /* Optional Basic metadata */
 /* ZCL character strings: leading byte is the length. Kept as two adjacent
  * literals because a hex escape swallows any hex digits that follow it -
  * "\x0a2026-09-09" would parse as one out-of-range escape, not \n + "2026...". */
-#define SHS_BASIC_DATE_CODE             "\x0a" "2026-09-14"
-#define SHS_BASIC_SW_BUILD_ID           "\x06" "v1.1.1"
+#define SHS_BASIC_DATE_CODE             "\x0a" "2026-09-23"
+#define SHS_BASIC_SW_BUILD_ID           "\x06" "v2.0.0"
 
 /* ============================================================================
  * CLUSTER IDS
@@ -104,8 +104,9 @@
 #define SHS_ATTR_ZONE_OCC_DELAY         0x0007  /* uint16, seconds (zone occupancy clear delay) */
 #define SHS_ATTR_MOVING_SENS_0_10       0x0003  /* uint16, 0-10 scale */
 #define SHS_ATTR_STATIC_SENS_0_10       0x0004  /* uint16, 0-10 scale */
-#define SHS_ATTR_MOVING_MAX_GATE        0x0005  /* uint16, 0-8 (movement detection range) */
-#define SHS_ATTR_STATIC_MAX_GATE        0x0006  /* uint16, 2-8 (static detection range) */
+#define SHS_ATTR_MAX_GATE               0x0005  /* uint16, 0-13 (furthest gate considered) */
+#define SHS_ATTR_MIN_GATE               0x000B  /* uint16, 0-13 (nearest gate considered) */
+#define SHS_ATTR_BG_CORRECTION          0x000C  /* uint16, write 1 to run background correction */
 #define SHS_ATTR_POSITION_REPORTING     0x0008  /* bool, enable X/Y position reporting (config mode) */
 #define SHS_ATTR_MIN_MOVING_ENERGY      0x0009  /* uint16, 0-100 (minimum energy for moving detection) */
 #define SHS_ATTR_MIN_STATIC_ENERGY      0x000A  /* uint16, 0-100 (minimum energy for static detection) */

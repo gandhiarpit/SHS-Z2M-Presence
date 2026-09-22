@@ -27,7 +27,7 @@
 #include "esp_timer.h"
 
 #include "shs01.h"
-#include "ld2410_enhanced.h"
+#include "ld2412_enhanced.h"
 #include "ld2450.h"
 #include "light_sensor.h"
 #include "ha/esp_zigbee_ha_standard.h"
@@ -106,8 +106,9 @@ static uint32_t shs_moving_cooldown_until = 0;  /* Cooldown timestamp for moving
 static uint32_t shs_static_cooldown_until = 0;  /* Cooldown timestamp for static target */
 static uint8_t  shs_moving_sens_0_100     = 60;
 static uint8_t  shs_static_sens_0_100     = 50;
-static uint16_t shs_moving_max_gate       = 8;
-static uint16_t shs_static_max_gate       = 8;
+static uint16_t shs_max_gate              = 13; /* LD2412 has gates 0-13 */
+static uint16_t shs_min_gate              = 1;  /* 1 keeps gate 0 clutter out in hardware */
+static uint16_t shs_bg_correction         = 0;  /* write 1 to trigger, self-clearing */
 static uint16_t shs_sens_mv_0_10          = 4;  /* Matches threshold 60: 10 - (60/10) = 4 */
 static uint16_t shs_sens_st_0_10          = 5;  /* Matches threshold 50: 10 - (50/10) = 5 */
 
@@ -118,11 +119,11 @@ static bool     shs_position_reporting    = false;
 static uint16_t shs_min_moving_energy     = 40;   /* 0-100, NOT ACTIVE - kept for Zigbee attribute compatibility */
 static uint16_t shs_min_static_energy     = 40;   /* 0-100, NOT ACTIVE - kept for Zigbee attribute compatibility */
 
-/* Firmware version (read from LD2410) */
+/* Firmware version (read from LD2412) */
 static char     shs_firmware_version[20]  = "Unknown";
 
 /* ============================================================================
- * LIVE DATA (updated from LD2410)
+ * LIVE DATA (updated from LD2412)
  * ============================================================================ */
 
 /* Occupancy states */
@@ -343,23 +344,24 @@ static void shs_cfg_load_from_nvs(void) {
     if (nvs_get_u8(h, SHS_NVS_KEY_ST_SENS, &u8tmp) == ESP_OK)
         shs_static_sens_0_100 = (u8tmp > 100) ? 100 : u8tmp;
     if (nvs_get_u8(h, SHS_NVS_KEY_MV_GATE, &u8tmp) == ESP_OK) {
-        /* Minimum 1 to avoid the gate 0 false positive issue */
-        if (u8tmp < 1) u8tmp = 8;  /* 0 is invalid, use default 8 */
-        else if (u8tmp > 8) u8tmp = 8;
-        shs_moving_max_gate = u8tmp;
+        if (u8tmp > LD2412_MAX_GATES - 1) u8tmp = LD2412_MAX_GATES - 1;
+        shs_max_gate = u8tmp;
     }
     if (nvs_get_u8(h, SHS_NVS_KEY_ST_GATE, &u8tmp) == ESP_OK) {
-        if (u8tmp < 2) u8tmp = 2; else if (u8tmp > 8) u8tmp = 8;
-        shs_static_max_gate = u8tmp;
+        if (u8tmp > LD2412_MAX_GATES - 1) u8tmp = LD2412_MAX_GATES - 1;
+        shs_min_gate = u8tmp;
     }
+    /* A stored pair from an LD2410 build can invert once the semantics flip
+     * from (max moving, max static) to (min, max); keep them ordered. */
+    if (shs_min_gate > shs_max_gate) shs_min_gate = shs_max_gate;
 
     nvs_close(h);
     shs_cfg_sync_sens_proxies();
 
-    ESP_LOGI(SHS_TAG, "NVS loaded: mv_cd=%us, occ_cd=%us, mv_sens=%u, st_sens=%u, mv_gate=%u, st_gate=%u",
+    ESP_LOGI(SHS_TAG, "NVS loaded: mv_cd=%us, occ_cd=%us, mv_sens=%u, st_sens=%u, max_gate=%u, min_gate=%u",
              (unsigned)shs_movement_cooldown_sec, (unsigned)shs_occupancy_clear_sec,
              (unsigned)shs_moving_sens_0_100, (unsigned)shs_static_sens_0_100,
-             (unsigned)shs_moving_max_gate, (unsigned)shs_static_max_gate);
+             (unsigned)shs_max_gate, (unsigned)shs_min_gate);
 }
 
 /* ============================================================================
@@ -683,10 +685,10 @@ static void shs_zb_set_ou_delay_ep2(uint16_t seconds) {
 }
 
 /* ============================================================================
- * LD2410 CALLBACKS - Update Zigbee attributes on sensor changes
+ * LD2412 CALLBACKS - Update Zigbee attributes on sensor changes
  * ============================================================================ */
 
-static void shs_on_state_change(const ld2410_state_t *state) {
+static void shs_on_state_change(const ld2412_state_t *state) {
     /* Extract RAW states directly from sensor */
     bool raw_moving = (state->target.target_state & 0x01) != 0;
     bool raw_static = (state->target.target_state & 0x02) != 0;
@@ -697,7 +699,7 @@ static void shs_on_state_change(const ld2410_state_t *state) {
 #if 0
     /* Gate 0 hard block:
      * Always ignore detections at gate 0 (< 75cm) - these are PCB/housing reflections.
-     * The LD2410's hardware gate 0 sensitivity setting is unreliable on some firmware.
+     * The LD2412's hardware gate 0 sensitivity setting is unreliable on some firmware.
      */
     if (raw_moving && state->target.moving_distance < 75) {
         raw_moving = false;
@@ -720,9 +722,9 @@ static void shs_on_state_change(const ld2410_state_t *state) {
 #endif
 
     /* LD2450 cross-validation:
-     * If LD2450 sees 0 targets, ignore LD2410 detections - they're likely interference.
+     * If LD2450 sees 0 targets, ignore LD2412 detections - they're likely interference.
      * The LD2450 is more accurate and doesn't suffer from the same noise issues.
-     * This effectively uses LD2450 as a "sanity check" for LD2410.
+     * This effectively uses LD2450 as a "sanity check" for LD2412.
      */
     if (shs_ld2450_target_count == 0) {
         raw_moving = false;
@@ -1200,7 +1202,7 @@ static void shs_on_ld2450_target_update(const ld2450_target_t *targets, uint8_t 
  * ============================================================================
  *
  * The LD2450 loses a stationary target for a frame or two fairly often, which
- * made zoneN_occupied strobe where occupancy_ld2410 stays steady - the LD2410
+ * made zoneN_occupied strobe where occupancy_ld2412 stays steady - the LD2412
  * path has had cooldowns from the start, the zone path had nothing. This holds
  * a zone occupied for shs_zone_occupancy_delay_sec after its last target
  * leaves; a target returning inside that window cancels the pending clear.
@@ -1420,14 +1422,14 @@ static void shs_ld2450_force_update(void) {
 }
 
 /**
- * Force update LD2410C and config attributes to Zigbee (for initial reporting)
+ * Force update LD2412 and config attributes to Zigbee (for initial reporting)
  * Split into smaller lock sections to prevent blocking Zigbee task.
  */
-static void shs_ld2410c_force_update(void) {
-    ESP_LOGI(SHS_TAG, "Force update LD2410C: moving=%d static=%d occ=%d",
+static void shs_ld2412c_force_update(void) {
+    ESP_LOGI(SHS_TAG, "Force update LD2412: moving=%d static=%d occ=%d",
              shs_moving_state, shs_static_state, shs_occupancy_state);
 
-    /* EP2: LD2410C occupancy */
+    /* EP2: LD2412 occupancy */
     if (esp_zb_lock_acquire(pdMS_TO_TICKS(SHS_FORCE_UPDATE_LOCK_TIMEOUT_MS))) {
         uint8_t occ_val = shs_occupancy_state ? 1 : 0;
         esp_zb_zcl_set_attribute_val(
@@ -1446,7 +1448,7 @@ static void shs_ld2410c_force_update(void) {
     if (esp_zb_lock_acquire(pdMS_TO_TICKS(SHS_FORCE_UPDATE_LOCK_TIMEOUT_MS))) {
         uint8_t moving_val = shs_moving_state ? 1 : 0;
         esp_zb_zcl_set_attribute_val(
-            SHS_EP_LD2410C_MOVING,
+            SHS_EP_LD2412_MOVING,
             SHS_CLUSTER_BINARY_INPUT,
             ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
             SHS_ATTR_PRESENT_VALUE_BINARY,
@@ -1461,7 +1463,7 @@ static void shs_ld2410c_force_update(void) {
     if (esp_zb_lock_acquire(pdMS_TO_TICKS(SHS_FORCE_UPDATE_LOCK_TIMEOUT_MS))) {
         uint8_t static_val = shs_static_state ? 1 : 0;
         esp_zb_zcl_set_attribute_val(
-            SHS_EP_LD2410C_STATIC,
+            SHS_EP_LD2412_STATIC,
             SHS_CLUSTER_BINARY_INPUT,
             ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
             SHS_ATTR_PRESENT_VALUE_BINARY,
@@ -1538,8 +1540,8 @@ static void shs_ld2410c_force_update(void) {
             SHS_EP_LIGHT,
             SHS_CL_CFG_ID,
             ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-            SHS_ATTR_MOVING_MAX_GATE,
-            &shs_moving_max_gate,
+            SHS_ATTR_MAX_GATE,
+            &shs_max_gate,
             true
         );
 
@@ -1547,8 +1549,8 @@ static void shs_ld2410c_force_update(void) {
             SHS_EP_LIGHT,
             SHS_CL_CFG_ID,
             ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-            SHS_ATTR_STATIC_MAX_GATE,
-            &shs_static_max_gate,
+            SHS_ATTR_MIN_GATE,
+            &shs_min_gate,
             true
         );
 
@@ -1564,47 +1566,48 @@ static void shs_ld2410c_force_update(void) {
     }
 
     shs_last_successful_tx = (uint32_t)(esp_timer_get_time() / 1000);
-    ESP_LOGI(SHS_TAG, "LD2410C/Config force update complete (cooldown=%d, delay=%d, sens_mv=%d, sens_st=%d, gate_mv=%d, gate_st=%d)",
+    ESP_LOGI(SHS_TAG, "LD2412/Config force update complete (cooldown=%d, delay=%d, sens_mv=%d, sens_st=%d, gate_mv=%d, gate_st=%d)",
              shs_movement_cooldown_sec, shs_occupancy_clear_sec,
              shs_sens_mv_0_10, shs_sens_st_0_10,
-             shs_moving_max_gate, shs_static_max_gate);
+             shs_max_gate, shs_min_gate);
 }
 
 /* ============================================================================
- * APPLY LD2410 CONFIGURATION
+ * APPLY LD2412 CONFIGURATION
  * ============================================================================ */
 
-static void shs_apply_ld2410_config(void) {
-    /* Set max gates and timeout */
-    ld2410_set_max_gate_timeout(
-        (uint8_t)shs_moving_max_gate,
-        (uint8_t)shs_static_max_gate,
+static void shs_apply_ld2412_config(void) {
+    /* Set detection range and timeout. The LD2412 takes (min, max); the
+     * LD2410 took (max moving, max static), so the order is not the same. */
+    ld2412_set_basic_config(
+        (uint8_t)shs_min_gate,
+        (uint8_t)shs_max_gate,
         shs_occupancy_clear_sec
     );
 
     /* Set global sensitivity */
-    ld2410_set_all_sensitivity(shs_moving_sens_0_100, shs_static_sens_0_100);
+    ld2412_set_all_sensitivity(shs_moving_sens_0_100, shs_static_sens_0_100);
 
     /* DISABLED: Gate 0 blocking - testing detection speed without this filter
      * Uncomment if false positives occur from sensor housing/mounting reflections */
-    // ld2410_set_gate_sensitivity(0, 0, 0);
+    // ld2412_set_gate_sensitivity(0, 0, 0);
 
     /* Set cooldowns */
-    ld2410_set_moving_cooldown(shs_movement_cooldown_sec);
-    ld2410_set_occupancy_delay(shs_occupancy_clear_sec);
+    ld2412_set_moving_cooldown(shs_movement_cooldown_sec);
+    ld2412_set_occupancy_delay(shs_occupancy_clear_sec);
 
     /* Read firmware version */
-    ld2410_read_firmware_version();
-    const ld2410_state_t *state = ld2410_get_state();
+    ld2412_read_firmware_version();
+    const ld2412_state_t *state = ld2412_get_state();
     if (state->firmware.valid) {
         snprintf(shs_firmware_version, sizeof(shs_firmware_version),
                  "V%d.%02d", state->firmware.major, state->firmware.minor);
     }
 
     /* Read current config from sensor */
-    ld2410_read_config();
+    ld2412_read_config();
 
-    ESP_LOGI(SHS_TAG, "LD2410 configuration applied");
+    ESP_LOGI(SHS_TAG, "LD2412 configuration applied");
 }
 
 /* ============================================================================
@@ -1648,15 +1651,15 @@ static esp_err_t shs_zb_attribute_handler(const esp_zb_zcl_set_attr_value_messag
             case SHS_ATTR_MOVEMENT_COOLDOWN:
                 if (v > SHS_COOLDOWN_MAX_SEC) v = SHS_COOLDOWN_MAX_SEC;
                 shs_movement_cooldown_sec = v;
-                ld2410_set_moving_cooldown(v);
+                ld2412_set_moving_cooldown(v);
                 shs_save_enqueue(SHS_SAVE_IMMEDIATE_U16, (SHS_ATTR_MOVEMENT_COOLDOWN << 8));
                 ESP_LOGI(SHS_TAG, "Set Movement Cooldown = %us", (unsigned)v);
                 return ESP_OK;
 
             case SHS_ATTR_OCC_CLEAR_COOLDOWN:
                 shs_occupancy_clear_sec = v;
-                ld2410_set_max_gate_timeout((uint8_t)shs_moving_max_gate,
-                                           (uint8_t)shs_static_max_gate, v);
+                ld2412_set_basic_config((uint8_t)shs_min_gate,
+                                        (uint8_t)shs_max_gate, v);
                 shs_zb_set_ou_delay_ep2(v);
                 shs_save_enqueue(SHS_SAVE_IMMEDIATE_U16, (SHS_ATTR_OCC_CLEAR_COOLDOWN << 8));
                 ESP_LOGI(SHS_TAG, "Set Occupancy Cooldown = %us", (unsigned)v);
@@ -1675,7 +1678,7 @@ static esp_err_t shs_zb_attribute_handler(const esp_zb_zcl_set_attr_value_messag
                 /* Invert: user's 10 (max sens) → sensor threshold 0 (easiest to trigger)
                  *         user's 0 (min sens)  → sensor threshold 100 (hardest to trigger) */
                 shs_moving_sens_0_100 = (uint8_t)((10 - v) * 10);
-                ld2410_set_all_sensitivity(shs_moving_sens_0_100, shs_static_sens_0_100);
+                ld2412_set_all_sensitivity(shs_moving_sens_0_100, shs_static_sens_0_100);
                 shs_save_enqueue(SHS_SAVE_DEBOUNCE_SENS_MOVE, shs_moving_sens_0_100);
                 ESP_LOGI(SHS_TAG, "Set Moving Sensitivity = %u/10 (threshold=%u)", (unsigned)v, (unsigned)shs_moving_sens_0_100);
                 return ESP_OK;
@@ -1686,27 +1689,41 @@ static esp_err_t shs_zb_attribute_handler(const esp_zb_zcl_set_attr_value_messag
                 /* Invert: user's 10 (max sens) → sensor threshold 0 (easiest to trigger)
                  *         user's 0 (min sens)  → sensor threshold 100 (hardest to trigger) */
                 shs_static_sens_0_100 = (uint8_t)((10 - v) * 10);
-                ld2410_set_all_sensitivity(shs_moving_sens_0_100, shs_static_sens_0_100);
+                ld2412_set_all_sensitivity(shs_moving_sens_0_100, shs_static_sens_0_100);
                 shs_save_enqueue(SHS_SAVE_DEBOUNCE_SENS_STATIC, shs_static_sens_0_100);
                 ESP_LOGI(SHS_TAG, "Set Static Sensitivity = %u/10 (threshold=%u)", (unsigned)v, (unsigned)shs_static_sens_0_100);
                 return ESP_OK;
 
-            case SHS_ATTR_MOVING_MAX_GATE:
-                if (v > 8) v = 8;
-                shs_moving_max_gate = v;
-                ld2410_set_max_gate_timeout((uint8_t)v, (uint8_t)shs_static_max_gate,
-                                           shs_occupancy_clear_sec);
+            case SHS_ATTR_MAX_GATE:
+                if (v > LD2412_MAX_GATES - 1) v = LD2412_MAX_GATES - 1;
+                if (v < shs_min_gate) v = shs_min_gate;
+                shs_max_gate = v;
+                ld2412_set_basic_config((uint8_t)shs_min_gate, (uint8_t)v,
+                                        shs_occupancy_clear_sec);
                 shs_save_enqueue(SHS_SAVE_DEBOUNCE_GATE_MOVE, v);
-                ESP_LOGI(SHS_TAG, "Set Movement Detection Range = %u", (unsigned)v);
+                ESP_LOGI(SHS_TAG, "Set Max Detection Gate = %u", (unsigned)v);
                 return ESP_OK;
 
-            case SHS_ATTR_STATIC_MAX_GATE:
-                if (v < 2) v = 2; else if (v > 8) v = 8;
-                shs_static_max_gate = v;
-                ld2410_set_max_gate_timeout((uint8_t)shs_moving_max_gate, (uint8_t)v,
-                                           shs_occupancy_clear_sec);
+            case SHS_ATTR_MIN_GATE:
+                if (v > LD2412_MAX_GATES - 1) v = LD2412_MAX_GATES - 1;
+                if (v > shs_max_gate) v = shs_max_gate;
+                shs_min_gate = v;
+                ld2412_set_basic_config((uint8_t)v, (uint8_t)shs_max_gate,
+                                        shs_occupancy_clear_sec);
                 shs_save_enqueue(SHS_SAVE_DEBOUNCE_GATE_STATIC, v);
-                ESP_LOGI(SHS_TAG, "Set Static Detection Range = %u", (unsigned)v);
+                ESP_LOGI(SHS_TAG, "Set Min Detection Gate = %u", (unsigned)v);
+                return ESP_OK;
+
+            case SHS_ATTR_BG_CORRECTION:
+                /* Write-1-to-run trigger. The LD2412 learns the static clutter
+                 * in front of it and subtracts it; it reports no completion, so
+                 * the attribute clears itself immediately rather than pretending
+                 * to track progress. */
+                if (v) {
+                    ESP_LOGI(SHS_TAG, "Starting dynamic background correction");
+                    ld2412_start_bg_correction();
+                }
+                shs_bg_correction = 0;
                 return ESP_OK;
 
             case SHS_ATTR_POSITION_REPORTING:
@@ -1725,14 +1742,14 @@ static esp_err_t shs_zb_attribute_handler(const esp_zb_zcl_set_attr_value_messag
             case SHS_ATTR_MIN_MOVING_ENERGY:
                 if (v > 100) v = 100;
                 shs_min_moving_energy = v;
-                /* ld2410_set_min_moving_energy removed - using backup2 driver */
+                /* ld2412_set_min_moving_energy removed - using backup2 driver */
                 ESP_LOGI(SHS_TAG, "Min Moving Energy = %d (NOT USED - backup2 driver)", (int)shs_min_moving_energy);
                 return ESP_OK;
 
             case SHS_ATTR_MIN_STATIC_ENERGY:
                 if (v > 100) v = 100;
                 shs_min_static_energy = v;
-                /* ld2410_set_min_static_energy removed - using backup2 driver */
+                /* ld2412_set_min_static_energy removed - using backup2 driver */
                 ESP_LOGI(SHS_TAG, "Min Static Energy = %d (NOT USED - backup2 driver)", (int)shs_min_static_energy);
                 return ESP_OK;
 
@@ -2036,16 +2053,16 @@ static void shs_boot_button_task(void *pv) {
                 ESP_LOGI(SHS_TAG, "Click %d detected (held=%lu ticks)", click_count, (unsigned long)held);
 
                 if (click_count == 4) {
-                    /* QUADRUPLE-CLICK: Factory reset LD2410C sensor */
+                    /* QUADRUPLE-CLICK: Factory reset LD2412 sensor */
                     click_count = 0;
-                    ESP_LOGW(SHS_TAG, "QUADRUPLE-CLICK: Factory resetting LD2410C sensor...");
+                    ESP_LOGW(SHS_TAG, "QUADRUPLE-CLICK: Factory resetting LD2412 sensor...");
                     shs_flash_led(4, 100, 100);  /* 4 flashes to confirm */
-                    esp_err_t err = ld2410_factory_reset();
+                    esp_err_t err = ld2412_factory_reset();
                     if (err == ESP_OK) {
-                        ESP_LOGI(SHS_TAG, "LD2410C factory reset SUCCESS - sensor will restart");
+                        ESP_LOGI(SHS_TAG, "LD2412 factory reset SUCCESS - sensor will restart");
                         shs_flash_led(1, 1000, 0);  /* Long flash = success */
                     } else {
-                        ESP_LOGE(SHS_TAG, "LD2410C factory reset FAILED: %s", esp_err_to_name(err));
+                        ESP_LOGE(SHS_TAG, "LD2412 factory reset FAILED: %s", esp_err_to_name(err));
                         shs_flash_led(5, 50, 50);  /* Rapid flashes = error */
                     }
                 } else if (click_count == 3) {
@@ -2104,42 +2121,42 @@ static void shs_boot_button_task(void *pv) {
 }
 
 /* ============================================================================
- * LD2410 PROCESSING TASK
+ * LD2412 PROCESSING TASK
  * ============================================================================ */
 
-static void shs_ld2410_task(void *pvParameters) {
-    ESP_LOGI(SHS_TAG, "LD2410 processing task started");
+static void shs_ld2412_task(void *pvParameters) {
+    ESP_LOGI(SHS_TAG, "LD2412 processing task started");
 
     /* Wait for sensor to stabilize before applying config */
-    ESP_LOGI(SHS_TAG, "Waiting for LD2410 to stabilize before config...");
+    ESP_LOGI(SHS_TAG, "Waiting for LD2412 to stabilize before config...");
     vTaskDelay(pdMS_TO_TICKS(500));
-    shs_apply_ld2410_config();
+    shs_apply_ld2412_config();
 
     uint32_t last_connected_time = 0;
     bool was_connected = false;
     const uint32_t RECOVERY_INTERVAL_MS = 30000;  // Try recovery every 30s if disconnected
 
     while (1) {
-        ld2410_process();
+        ld2412_process();
 
         /* Monitor connection state and attempt recovery if needed */
-        bool connected = ld2410_is_connected();
+        bool connected = ld2412_is_connected();
         uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
 
         if (connected) {
             last_connected_time = now;
             if (!was_connected) {
-                ESP_LOGI(SHS_TAG, "LD2410 connection restored");
+                ESP_LOGI(SHS_TAG, "LD2412 connection restored");
             }
         } else if (was_connected) {
-            ESP_LOGW(SHS_TAG, "LD2410 disconnected - will attempt recovery");
+            ESP_LOGW(SHS_TAG, "LD2412 disconnected - will attempt recovery");
         } else if ((now - last_connected_time) > RECOVERY_INTERVAL_MS && last_connected_time > 0) {
-            /* Periodically try to restart LD2410 if it stays disconnected */
-            ESP_LOGW(SHS_TAG, "LD2410 still disconnected - sending restart command");
-            ld2410_restart();
+            /* Periodically try to restart LD2412 if it stays disconnected */
+            ESP_LOGW(SHS_TAG, "LD2412 still disconnected - sending restart command");
+            ld2412_restart();
             last_connected_time = now;  // Reset timer
             vTaskDelay(pdMS_TO_TICKS(500));  // Give sensor time to restart
-            shs_apply_ld2410_config();  // Re-apply configuration
+            shs_apply_ld2412_config();  // Re-apply configuration
         }
 
         was_connected = connected;
@@ -2424,7 +2441,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct) {
             shs_basic_publish_metadata_ep1();
             shs_zb_set_ou_delay_ep2(shs_occupancy_clear_sec);
 
-            /* LD2410C: Push current state to Zigbee (like older backup) */
+            /* LD2412: Push current state to Zigbee (like older backup) */
             shs_zb_set_bool_attr(SHS_EP_OCC, ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
                                 SHS_ATTR_OCC_MOVING_TARGET, shs_moving_state);
             shs_zb_set_bool_attr(SHS_EP_OCC, ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
@@ -2440,7 +2457,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct) {
                 ESP_LOGI(SHS_TAG, "Device rebooted - already joined network");
                 shs_zb_connected = true;
                 /* Device already joined - force update sensor states now */
-                shs_ld2410c_force_update();
+                shs_ld2412c_force_update();
                 shs_ld2450_force_update();
             }
         } else {
@@ -2458,7 +2475,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct) {
             shs_zb_rejoin_pending = false;  /* Clear rejoin flag on successful join */
             shs_last_successful_tx = (uint32_t)(esp_timer_get_time() / 1000);
             /* Device just joined - force update sensor states now */
-            shs_ld2410c_force_update();
+            shs_ld2412c_force_update();
             shs_ld2450_force_update();
         } else {
             ESP_LOGW(SHS_TAG, "Network steering not successful (%s)", esp_err_to_name(err_status));
@@ -2564,10 +2581,12 @@ static void shs_zigbee_task(void *pvParameters) {
             ESP_ZB_ZCL_ATTR_TYPE_U16, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, &shs_sens_mv_0_10);
         esp_zb_custom_cluster_add_custom_attr(cfg_cl, SHS_ATTR_STATIC_SENS_0_10,
             ESP_ZB_ZCL_ATTR_TYPE_U16, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, &shs_sens_st_0_10);
-        esp_zb_custom_cluster_add_custom_attr(cfg_cl, SHS_ATTR_MOVING_MAX_GATE,
-            ESP_ZB_ZCL_ATTR_TYPE_U16, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, &shs_moving_max_gate);
-        esp_zb_custom_cluster_add_custom_attr(cfg_cl, SHS_ATTR_STATIC_MAX_GATE,
-            ESP_ZB_ZCL_ATTR_TYPE_U16, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, &shs_static_max_gate);
+        esp_zb_custom_cluster_add_custom_attr(cfg_cl, SHS_ATTR_MAX_GATE,
+            ESP_ZB_ZCL_ATTR_TYPE_U16, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, &shs_max_gate);
+        esp_zb_custom_cluster_add_custom_attr(cfg_cl, SHS_ATTR_MIN_GATE,
+            ESP_ZB_ZCL_ATTR_TYPE_U16, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, &shs_min_gate);
+        esp_zb_custom_cluster_add_custom_attr(cfg_cl, SHS_ATTR_BG_CORRECTION,
+            ESP_ZB_ZCL_ATTR_TYPE_U16, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, &shs_bg_correction);
         esp_zb_custom_cluster_add_custom_attr(cfg_cl, SHS_ATTR_POSITION_REPORTING,
             ESP_ZB_ZCL_ATTR_TYPE_BOOL, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, &shs_position_reporting);
         esp_zb_custom_cluster_add_custom_attr(cfg_cl, SHS_ATTR_MIN_MOVING_ENERGY,
@@ -2963,7 +2982,7 @@ static void shs_zigbee_task(void *pvParameters) {
         }
     }
 
-    /* ========== EP17: LD2410C Moving Target (genBinaryInput) ========== */
+    /* ========== EP17: LD2412 Moving Target (genBinaryInput) ========== */
     {
         esp_zb_cluster_list_t *cl = esp_zb_zcl_cluster_list_create();
 
@@ -2981,16 +3000,16 @@ static void shs_zigbee_task(void *pvParameters) {
         esp_zb_cluster_list_add_binary_input_cluster(cl, binary_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
         esp_zb_endpoint_config_t ep_cfg = {
-            .endpoint = SHS_EP_LD2410C_MOVING,
+            .endpoint = SHS_EP_LD2412_MOVING,
             .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
             .app_device_id = ESP_ZB_HA_SIMPLE_SENSOR_DEVICE_ID,
             .app_device_version = 0
         };
         esp_zb_ep_list_add_ep(dev_ep_list, cl, ep_cfg);
-        esp_zcl_utility_add_ep_basic_manufacturer_info(dev_ep_list, SHS_EP_LD2410C_MOVING, &info);
+        esp_zcl_utility_add_ep_basic_manufacturer_info(dev_ep_list, SHS_EP_LD2412_MOVING, &info);
     }
 
-    /* ========== EP18: LD2410C Static Target (genBinaryInput) ========== */
+    /* ========== EP18: LD2412 Static Target (genBinaryInput) ========== */
     {
         esp_zb_cluster_list_t *cl = esp_zb_zcl_cluster_list_create();
 
@@ -3008,13 +3027,13 @@ static void shs_zigbee_task(void *pvParameters) {
         esp_zb_cluster_list_add_binary_input_cluster(cl, binary_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
         esp_zb_endpoint_config_t ep_cfg = {
-            .endpoint = SHS_EP_LD2410C_STATIC,
+            .endpoint = SHS_EP_LD2412_STATIC,
             .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
             .app_device_id = ESP_ZB_HA_SIMPLE_SENSOR_DEVICE_ID,
             .app_device_version = 0
         };
         esp_zb_ep_list_add_ep(dev_ep_list, cl, ep_cfg);
-        esp_zcl_utility_add_ep_basic_manufacturer_info(dev_ep_list, SHS_EP_LD2410C_STATIC, &info);
+        esp_zcl_utility_add_ep_basic_manufacturer_info(dev_ep_list, SHS_EP_LD2412_STATIC, &info);
     }
 
     /* ========== EP19: Zone 1 Target Count (genAnalogInput) ========== */
@@ -3232,7 +3251,7 @@ static void shs_save_worker(void *pv) {
     TickType_t last_mv_sens = 0, last_st_sens = 0, last_mv_gate = 0, last_st_gate = 0;
     bool pend_mv_sens = false, pend_st_sens = false, pend_mv_gate = false, pend_st_gate = false;
     uint8_t mv_sens_val = shs_moving_sens_0_100, st_sens_val = shs_static_sens_0_100;
-    uint8_t mv_gate_val = (uint8_t)shs_moving_max_gate, st_gate_val = (uint8_t)shs_static_max_gate;
+    uint8_t mv_gate_val = (uint8_t)shs_max_gate, st_gate_val = (uint8_t)shs_min_gate;
 
     shs_save_msg_t m;
     for (;;) {
@@ -3310,11 +3329,11 @@ void app_main(void) {
     /* Start Zigbee task FIRST — must be responsive before coordinator interview */
     xTaskCreate(shs_zigbee_task, "shs_zigbee_main", 8192, NULL, 5, NULL);
 
-    /* Initialize LD2410 enhanced driver */
-    ESP_ERROR_CHECK(ld2410_init());
+    /* Initialize LD2412 enhanced driver */
+    ESP_ERROR_CHECK(ld2412_init());
 
-    /* Register LD2410 callbacks */
-    ld2410_register_state_callback(shs_on_state_change);
+    /* Register LD2412 callbacks */
+    ld2412_register_state_callback(shs_on_state_change);
 
     /* Initialize LD2450 */
     ESP_LOGI(SHS_TAG, "Initializing LD2450 on UART0 GPIO18/19...");
@@ -3333,7 +3352,7 @@ void app_main(void) {
 
     /* Create sensor tasks — config and zone setup deferred to task prologues
      * Sensor tasks at priority 4 (lower than Zigbee at 5) to prevent network issues */
-    xTaskCreate(shs_ld2410_task, "shs_ld2410_task", 4096, NULL, 4, NULL);
+    xTaskCreate(shs_ld2412_task, "shs_ld2412_task", 4096, NULL, 4, NULL);
     xTaskCreate(shs_ld2450_task, "shs_ld2450_task", 4096, NULL, 4, NULL);
     xTaskCreate(shs_boot_button_task, "shs_boot_button", 8192, NULL, 4, NULL);
     xTaskCreate(shs_light_sensor_task, "shs_light_sens", 3072, NULL, 4, NULL);

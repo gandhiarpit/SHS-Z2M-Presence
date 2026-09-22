@@ -232,7 +232,7 @@ static void parse_basic_frame(const uint8_t *data, int len) {
  * @brief Parse engineering mode frame (includes per-gate data)
  */
 static void parse_engineering_frame(const uint8_t *data, int len) {
-    if (len < 35) {  // Minimum engineering frame size
+    if (len < 40) {  // Need through the light byte at payload offset 39
         ESP_LOGW(TAG, "Engineering frame too short: %d bytes", len);
         return;
     }
@@ -246,11 +246,14 @@ static void parse_engineering_frame(const uint8_t *data, int len) {
     // [6-7] = static distance
     // [8] = static energy
     // [9-10] = detection distance
-    // [11] = max moving gate config
-    // [12] = max static gate config
-    // [13-21] = gate 0-8 moving energy (9 bytes)
-    // [22-30] = gate 0-8 static energy (9 bytes)
-    // [31+] = reserved data, tail, check
+    // [11-24] = gate 0-13 moving energy (14 bytes)
+    // [25-38] = gate 0-13 static energy (14 bytes)
+    // [39] = light level
+    // [40+] = tail, check
+    //
+    // These offsets are payload-relative. The LD2412_OFF_* constants in the
+    // header count from the frame header, 6 bytes earlier. Unlike the LD2410
+    // there is no max-gate preamble ahead of the energies.
 
     if (data[0] != LD2412_DATA_TYPE_ENGINEERING || data[1] != 0xAA) {
         ESP_LOGW(TAG, "Invalid engineering frame header");
@@ -273,15 +276,17 @@ static void parse_engineering_frame(const uint8_t *data, int len) {
     s_state.target.static_energy = data[8];
     s_state.target.detection_distance = data[9] | (data[10] << 8);
 
-    // Parse engineering-specific data
-    s_state.engineering.max_moving_gate = data[11];
-    s_state.engineering.max_static_gate = data[12];
+    // The LD2412 frame carries no max-gate preamble, so mirror the configured
+    // range rather than reading it back out of every frame.
+    s_state.engineering.max_moving_gate = s_state.config.max_gate;
+    s_state.engineering.max_static_gate = s_state.config.max_gate;
 
-    // Parse per-gate energy values
+    // Parse per-gate energy values (14 gates each)
     for (int i = 0; i < LD2412_MAX_GATES; i++) {
-        s_state.engineering.gates[i].move_energy = data[13 + i];
-        s_state.engineering.gates[i].still_energy = data[22 + i];
+        s_state.engineering.gates[i].move_energy  = data[11 + i];
+        s_state.engineering.gates[i].still_energy = data[25 + i];
     }
+    s_state.engineering.light_level = data[39];
     s_state.engineering.valid = true;
 
     // Update derived states (same logic as basic)
@@ -793,26 +798,24 @@ esp_err_t ld2412_disable_engineering_mode(void) {
     return err;
 }
 
-esp_err_t ld2412_set_max_gate_timeout(uint8_t max_moving_gate, uint8_t max_static_gate, uint16_t timeout_seconds) {
-    ESP_LOGI(TAG, "Setting max gates: moving=%d, static=%d, timeout=%ds",
-             max_moving_gate, max_static_gate, timeout_seconds);
+esp_err_t ld2412_set_basic_config(uint8_t min_gate, uint8_t max_gate, uint16_t timeout_seconds) {
+    ESP_LOGI(TAG, "Setting basic config: min_gate=%d, max_gate=%d, timeout=%ds",
+             min_gate, max_gate, timeout_seconds);
 
-    if (max_moving_gate > 8) max_moving_gate = 8;
-    if (max_static_gate < 2) max_static_gate = 2;
-    if (max_static_gate > 8) max_static_gate = 8;
+    if (min_gate > LD2412_MAX_GATES - 1) min_gate = LD2412_MAX_GATES - 1;
+    if (max_gate > LD2412_MAX_GATES - 1) max_gate = LD2412_MAX_GATES - 1;
+    if (max_gate < min_gate) max_gate = min_gate;
 
-    // Command format:
-    // 2 bytes param word + 4 bytes value for each of 3 parameters
-    uint8_t data[18] = {
-        // Max moving gate (word 0x0000)
-        0x00, 0x00,
-        max_moving_gate, 0x00, 0x00, 0x00,
-        // Max static gate (word 0x0001)
-        0x01, 0x00,
-        max_static_gate, 0x00, 0x00, 0x00,
-        // Timeout (word 0x0002)
-        0x02, 0x00,
-        (uint8_t)(timeout_seconds & 0xFF), (uint8_t)((timeout_seconds >> 8) & 0xFF), 0x00, 0x00
+    /* Where the LD2410 takes 18 bytes of (param word + 4-byte value) x 3,
+     * the LD2412 takes a flat 5-byte payload. The max gate goes on the wire
+     * one higher than its index while the min gate does not; that asymmetry
+     * is what the module expects. */
+    uint8_t data[5] = {
+        min_gate,
+        (uint8_t)(max_gate + 1),
+        (uint8_t)(timeout_seconds & 0xFF),
+        (uint8_t)((timeout_seconds >> 8) & 0xFF),
+        0x01            /* OUT pin active level: low */
     };
 
     esp_err_t err = enable_config();
@@ -821,54 +824,77 @@ esp_err_t ld2412_set_max_gate_timeout(uint8_t max_moving_gate, uint8_t max_stati
         return err;
     }
 
-    err = send_command_wait(LD2412_CMD_SET_MAX_GATE_TIMEOUT, data, sizeof(data), 100);
+    err = send_command_wait(LD2412_CMD_SET_BASIC_CONFIG, data, sizeof(data), 100);
     if (err == ESP_OK) {
-        s_state.config.max_moving_gate = max_moving_gate;
-        s_state.config.max_static_gate = max_static_gate;
+        s_state.config.min_gate = min_gate;
+        s_state.config.max_gate = max_gate;
         s_state.config.timeout_seconds = timeout_seconds;
-        ESP_LOGI(TAG, "Set max gates SUCCESS");
+        ESP_LOGI(TAG, "Set basic config SUCCESS");
     } else {
-        ESP_LOGE(TAG, "Set max gates FAILED: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "Set basic config FAILED: %s", esp_err_to_name(err));
     }
 
     end_config();
     return err;
 }
 
+/**
+ * Push all 14 gate thresholds from the cached config.
+ *
+ * Caller must already be in config mode. The LD2412 has no per-gate write:
+ * motion thresholds go out as one 14-byte array (0x0003) and static as a
+ * second (0x0004), so changing one gate still rewrites the whole set. That
+ * is why the driver keeps the full table in s_state.config.gates[].
+ */
+static esp_err_t push_gate_thresholds(void) {
+    uint8_t move[LD2412_MAX_GATES];
+    uint8_t still[LD2412_MAX_GATES];
+
+    for (int i = 0; i < LD2412_MAX_GATES; i++) {
+        move[i]  = s_state.config.gates[i].move_sensitivity;
+        still[i] = s_state.config.gates[i].still_sensitivity;
+    }
+
+    esp_err_t err = send_command_wait(LD2412_CMD_SET_MOTION_GATE_SENS, move, sizeof(move), 100);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Motion thresholds FAILED: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = send_command_wait(LD2412_CMD_SET_STATIC_GATE_SENS, still, sizeof(still), 100);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Static thresholds FAILED: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
 esp_err_t ld2412_set_gate_sensitivity(uint8_t gate, uint8_t move_sensitivity, uint8_t still_sensitivity) {
     ESP_LOGI(TAG, "Setting gate %d sensitivity: move=%d, still=%d", gate, move_sensitivity, still_sensitivity);
 
-    if (gate > 8) return ESP_ERR_INVALID_ARG;
+    if (gate >= LD2412_MAX_GATES) return ESP_ERR_INVALID_ARG;
     if (move_sensitivity > 100) move_sensitivity = 100;
     if (still_sensitivity > 100) still_sensitivity = 100;
 
-    // Command format:
-    // 2 bytes param word + 4 bytes value for each of 3 parameters
-    uint8_t data[18] = {
-        // Gate number (word 0x0000)
-        0x00, 0x00,
-        gate, 0x00, 0x00, 0x00,
-        // Move sensitivity (word 0x0001)
-        0x01, 0x00,
-        move_sensitivity, 0x00, 0x00, 0x00,
-        // Still sensitivity (word 0x0002)
-        0x02, 0x00,
-        still_sensitivity, 0x00, 0x00, 0x00
-    };
+    uint8_t prev_move  = s_state.config.gates[gate].move_sensitivity;
+    uint8_t prev_still = s_state.config.gates[gate].still_sensitivity;
+    s_state.config.gates[gate].move_sensitivity  = move_sensitivity;
+    s_state.config.gates[gate].still_sensitivity = still_sensitivity;
 
     esp_err_t err = enable_config();
     if (err != ESP_OK) {
+        s_state.config.gates[gate].move_sensitivity  = prev_move;
+        s_state.config.gates[gate].still_sensitivity = prev_still;
         ESP_LOGE(TAG, "Gate %d: Failed to enter config mode: %s", gate, esp_err_to_name(err));
         return err;
     }
 
-    err = send_command_wait(LD2412_CMD_SET_GATE_SENSITIVITY, data, sizeof(data), 100);
+    err = push_gate_thresholds();
     if (err == ESP_OK) {
-        s_state.config.gates[gate].move_sensitivity = move_sensitivity;
-        s_state.config.gates[gate].still_sensitivity = still_sensitivity;
         ESP_LOGI(TAG, "Gate %d sensitivity SUCCESS", gate);
     } else {
-        ESP_LOGE(TAG, "Gate %d sensitivity FAILED: %s", gate, esp_err_to_name(err));
+        /* Keep the cache in step with the module on failure. */
+        s_state.config.gates[gate].move_sensitivity  = prev_move;
+        s_state.config.gates[gate].still_sensitivity = prev_still;
     }
 
     end_config();
@@ -881,33 +907,34 @@ esp_err_t ld2412_set_all_sensitivity(uint8_t move_sensitivity, uint8_t still_sen
     if (move_sensitivity > 100) move_sensitivity = 100;
     if (still_sensitivity > 100) still_sensitivity = 100;
 
-    // Use 0xFFFF as gate value to set all gates
-    uint8_t data[18] = {
-        // Gate number (word 0x0000) - 0xFFFF = all gates
-        0x00, 0x00,
-        0xFF, 0xFF, 0x00, 0x00,
-        // Move sensitivity (word 0x0001)
-        0x01, 0x00,
-        move_sensitivity, 0x00, 0x00, 0x00,
-        // Still sensitivity (word 0x0002)
-        0x02, 0x00,
-        still_sensitivity, 0x00, 0x00, 0x00
-    };
+    /* The LD2412 has no "all gates" sentinel; fill the table and push it. */
+    uint8_t prev_move[LD2412_MAX_GATES];
+    uint8_t prev_still[LD2412_MAX_GATES];
+    for (int i = 0; i < LD2412_MAX_GATES; i++) {
+        prev_move[i]  = s_state.config.gates[i].move_sensitivity;
+        prev_still[i] = s_state.config.gates[i].still_sensitivity;
+        s_state.config.gates[i].move_sensitivity  = move_sensitivity;
+        s_state.config.gates[i].still_sensitivity = still_sensitivity;
+    }
 
     esp_err_t err = enable_config();
     if (err != ESP_OK) {
+        for (int i = 0; i < LD2412_MAX_GATES; i++) {
+            s_state.config.gates[i].move_sensitivity  = prev_move[i];
+            s_state.config.gates[i].still_sensitivity = prev_still[i];
+        }
         ESP_LOGE(TAG, "All gates: Failed to enter config mode: %s", esp_err_to_name(err));
         return err;
     }
 
-    err = send_command_wait(LD2412_CMD_SET_GATE_SENSITIVITY, data, sizeof(data), 100);
+    err = push_gate_thresholds();
     if (err == ESP_OK) {
-        for (int i = 0; i < LD2412_MAX_GATES; i++) {
-            s_state.config.gates[i].move_sensitivity = move_sensitivity;
-            s_state.config.gates[i].still_sensitivity = still_sensitivity;
-        }
         ESP_LOGI(TAG, "All gates sensitivity SUCCESS");
     } else {
+        for (int i = 0; i < LD2412_MAX_GATES; i++) {
+            s_state.config.gates[i].move_sensitivity  = prev_move[i];
+            s_state.config.gates[i].still_sensitivity = prev_still[i];
+        }
         ESP_LOGE(TAG, "All gates sensitivity FAILED: %s", esp_err_to_name(err));
     }
 
@@ -919,31 +946,41 @@ esp_err_t ld2412_read_config(void) {
     esp_err_t err = enable_config();
     if (err != ESP_OK) return err;
 
-    err = send_command_wait(LD2412_CMD_READ_PARAMS, NULL, 0, 100);
-    if (err == ESP_OK && s_response_len >= 28) {
-        // Parse response:
-        // [4] = 0xAA header
-        // [5] = max gates (N, typically 8)
-        // [6] = max moving gate config
-        // [7] = max static gate config
-        // [8-16] = gate 0-8 motion sensitivity
-        // [17-25] = gate 0-8 static sensitivity
-        // [26-27] = timeout (little-endian)
-
-        s_state.config.max_moving_gate = s_response_buffer[6];
-        s_state.config.max_static_gate = s_response_buffer[7];
-
-        for (int i = 0; i < LD2412_MAX_GATES; i++) {
-            s_state.config.gates[i].move_sensitivity = s_response_buffer[8 + i];
-            s_state.config.gates[i].still_sensitivity = s_response_buffer[17 + i];
-        }
-
-        s_state.config.timeout_seconds = s_response_buffer[26] | (s_response_buffer[27] << 8);
+    err = send_command_wait(LD2412_CMD_READ_BASIC_CONFIG, NULL, 0, 100);
+    if (err == ESP_OK && s_response_len >= 9) {
+        /* s_response_buffer[0-1] is the ACK command word and [2-3] the status,
+         * so the payload starts at [4]:
+         *   [4]   min gate
+         *   [5]   max gate, one higher than the index (mirrors the write)
+         *   [6-7] no-one duration, little-endian
+         *   [8]   OUT pin active level
+         */
+        s_state.config.min_gate = s_response_buffer[4];
+        s_state.config.max_gate = (s_response_buffer[5] > 0)
+                                ? (uint8_t)(s_response_buffer[5] - 1) : 0;
+        s_state.config.timeout_seconds = s_response_buffer[6] | (s_response_buffer[7] << 8);
         s_state.config.valid = true;
 
-        ESP_LOGI(TAG, "Config read: max_move=%d, max_static=%d, timeout=%d",
-                 s_state.config.max_moving_gate, s_state.config.max_static_gate,
+        ESP_LOGI(TAG, "Config read: min_gate=%d, max_gate=%d, timeout=%d",
+                 s_state.config.min_gate, s_state.config.max_gate,
                  s_state.config.timeout_seconds);
+    }
+
+    /* Gate thresholds are separate queries on the LD2412, and each answers
+     * with all 14 values starting at payload byte 0. */
+    if (err == ESP_OK) {
+        if (send_command_wait(LD2412_CMD_READ_MOTION_GATE_SENS, NULL, 0, 100) == ESP_OK &&
+            s_response_len >= 4 + LD2412_MAX_GATES) {
+            for (int i = 0; i < LD2412_MAX_GATES; i++) {
+                s_state.config.gates[i].move_sensitivity = s_response_buffer[4 + i];
+            }
+        }
+        if (send_command_wait(LD2412_CMD_READ_STATIC_GATE_SENS, NULL, 0, 100) == ESP_OK &&
+            s_response_len >= 4 + LD2412_MAX_GATES) {
+            for (int i = 0; i < LD2412_MAX_GATES; i++) {
+                s_state.config.gates[i].still_sensitivity = s_response_buffer[4 + i];
+            }
+        }
     }
 
     end_config();
@@ -1046,4 +1083,40 @@ const char* ld2412_state_to_string(uint8_t state) {
         case LD2412_STATE_MOVING_AND_STATIC: return "Moving + Static";
         default: return "Unknown";
     }
+}
+
+/* ============================================================================
+ * DYNAMIC BACKGROUND CORRECTION (LD2412 only)
+ * ============================================================================ */
+
+esp_err_t ld2412_start_bg_correction(void) {
+    ESP_LOGI(TAG, "Starting dynamic background correction");
+
+    esp_err_t err = enable_config();
+    if (err != ESP_OK) return err;
+
+    err = send_command_wait(LD2412_CMD_BG_CORRECTION, NULL, 0, 100);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Background correction FAILED: %s", esp_err_to_name(err));
+    }
+
+    end_config();
+    return err;
+}
+
+esp_err_t ld2412_bg_correction_running(bool *running) {
+    if (running == NULL) return ESP_ERR_INVALID_ARG;
+    *running = false;
+
+    esp_err_t err = enable_config();
+    if (err != ESP_OK) return err;
+
+    err = send_command_wait(LD2412_CMD_READ_BG_CORRECTION, NULL, 0, 100);
+    if (err == ESP_OK && s_response_len >= 5) {
+        /* Payload byte 0 stays non-zero while the correction is running. */
+        *running = (s_response_buffer[4] != 0);
+    }
+
+    end_config();
+    return err;
 }

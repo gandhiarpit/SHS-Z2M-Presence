@@ -161,9 +161,10 @@ typedef struct {
  * @brief Engineering mode data (per-gate values)
  */
 typedef struct {
-    uint8_t max_moving_gate;    // Configured max moving gate
-    uint8_t max_static_gate;    // Configured max static gate
+    uint8_t max_moving_gate;    // Mirrored from config (absent from the LD2412 frame)
+    uint8_t max_static_gate;    // Mirrored from config (absent from the LD2412 frame)
     ld2412_gate_energy_t gates[LD2412_MAX_GATES];  // Energy per gate
+    uint8_t light_level;        // Onboard photosensor 0-255 (LD2412 only)
     bool valid;                 // Whether engineering data is valid
 } ld2412_engineering_data_t;
 
@@ -171,8 +172,8 @@ typedef struct {
  * @brief Configuration parameters
  */
 typedef struct {
-    uint8_t max_moving_gate;    // Max gate for motion detection (0-8)
-    uint8_t max_static_gate;    // Max gate for static detection (2-8)
+    uint8_t min_gate;           // Nearest gate considered (0-13)
+    uint8_t max_gate;           // Furthest gate considered (0-13)
     uint16_t timeout_seconds;   // No-one duration in seconds
     ld2412_gate_config_t gates[LD2412_MAX_GATES];  // Per-gate sensitivity
     bool valid;                 // Whether config is valid
@@ -290,7 +291,7 @@ esp_err_t ld2412_disable_engineering_mode(void);
  * @param timeout_seconds No-one duration in seconds
  * @return ESP_OK on success
  */
-esp_err_t ld2412_set_max_gate_timeout(
+esp_err_t ld2412_set_basic_config(
     uint8_t max_moving_gate,
     uint8_t max_static_gate,
     uint16_t timeout_seconds
@@ -400,6 +401,25 @@ static inline uint8_t ld2412_cm_to_gate(uint16_t cm) {
  * @brief Check if sensor is connected and responding
  */
 bool ld2412_is_connected(void);
+
+/**
+ * @brief Start dynamic background correction
+ *
+ * The LD2412 learns the static clutter in front of it and subtracts it.
+ * It takes several seconds and the module gives no completion signal, so
+ * poll ld2412_bg_correction_running() to find out when it has finished.
+ *
+ * @return ESP_OK on success
+ */
+esp_err_t ld2412_start_bg_correction(void);
+
+/**
+ * @brief Query whether background correction is still running
+ *
+ * @param[out] running Set true while the correction is in progress
+ * @return ESP_OK on success
+ */
+esp_err_t ld2412_bg_correction_running(bool *running);
 
 /**
  * @brief Get string representation of target state

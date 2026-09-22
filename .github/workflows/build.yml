@@ -42,9 +42,9 @@ jobs:
           # literal, so match the vN.N.N token rather than the first quoted one.
           VER="$(grep -oP 'SHS_BASIC_SW_BUILD_ID.*"\Kv[0-9][^"]*' main/shs01.h)"
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            NAME="SHS_Z2M_Presence_${GITHUB_REF_NAME}_merged.bin"
+            NAME="SHS_Z2M_Presence_LD2412_${GITHUB_REF_NAME}_merged.bin"
           else
-            NAME="SHS_Z2M_Presence_${VER}_${GITHUB_SHA::7}_merged.bin"
+            NAME="SHS_Z2M_Presence_LD2412_${VER}_${GITHUB_SHA::7}_merged.bin"
           fi
           mkdir -p dist
           cp build/merged-binary.bin "dist/${NAME}"
