@@ -85,7 +85,9 @@ static void flush_and_reset(void) {
  * @brief Parse basic target data frame (normal mode)
  */
 static void parse_basic_frame(const uint8_t *data, int len) {
-    if (len < 13) {
+    /* The LD2412 normal frame carries 11 in-frame bytes, not the LD2410's 13:
+     * it has no detection-distance field, so the 0x55 tail sits at [9]. */
+    if (len < 11) {
         ESP_LOGW(TAG, "Basic frame too short: %d bytes", len);
         return;
     }
@@ -98,9 +100,11 @@ static void parse_basic_frame(const uint8_t *data, int len) {
     // [5] = moving energy
     // [6-7] = static distance (little-endian)
     // [8] = static energy
-    // [9-10] = detection distance (little-endian)
-    // [11] = 0x55 (tail)
-    // [12] = 0x00 (check)
+    // [9] = 0x55 (tail)
+    // [10] = 0x00 (check)
+    //
+    // There is no detection-distance field on the LD2412; it is derived below
+    // from whichever target is actually present.
 
     if (data[0] != LD2412_DATA_TYPE_BASIC || data[1] != 0xAA) {
         ESP_LOGW(TAG, "Invalid basic frame header");
@@ -116,11 +120,47 @@ static void parse_basic_frame(const uint8_t *data, int len) {
 
     // Parse target data
     s_state.target.target_state = data[2];
+
+    /* Values of 0x04 and up report dynamic-background-correction progress, not
+     * targets. Left alone they would be read as occupancy bits, so record the
+     * code and treat the frame as reporting nobody - which is what the module
+     * expects the room to be while a correction runs. */
+    if (s_state.target.target_state >= LD2412_STATE_BG_FIRST) {
+        if (s_state.bg_correction_state != s_state.target.target_state) {
+            ESP_LOGI(TAG, "Background correction status: 0x%02X", s_state.target.target_state);
+        }
+        s_state.bg_correction_state = s_state.target.target_state;
+        s_state.target.target_state = LD2412_STATE_NO_TARGET;
+    } else {
+        s_state.bg_correction_state = 0;
+    }
+
+    /* Values of 0x04 and up report dynamic-background-correction progress, not
+     * targets. Left alone they would be read as occupancy bits, so record the
+     * code and treat the frame as reporting nobody - which is what the module
+     * expects the room to be while a correction runs. */
+    if (s_state.target.target_state >= LD2412_STATE_BG_FIRST) {
+        if (s_state.bg_correction_state != s_state.target.target_state) {
+            ESP_LOGI(TAG, "Background correction status: 0x%02X", s_state.target.target_state);
+        }
+        s_state.bg_correction_state = s_state.target.target_state;
+        s_state.target.target_state = LD2412_STATE_NO_TARGET;
+    } else {
+        s_state.bg_correction_state = 0;
+    }
     s_state.target.moving_distance = data[3] | (data[4] << 8);
     s_state.target.moving_energy = data[5];
     s_state.target.static_distance = data[6] | (data[7] << 8);
     s_state.target.static_energy = data[8];
-    s_state.target.detection_distance = data[9] | (data[10] << 8);
+    /* Derived, not reported: the LD2412 drops the LD2410's detection-distance
+     * field, so take the distance of whichever target is present. */
+    if (s_state.target.target_state & LD2412_STATE_MOVING) {
+        s_state.target.detection_distance = s_state.target.moving_distance;
+    } else if (s_state.target.target_state & LD2412_STATE_STATIC) {
+        s_state.target.detection_distance = s_state.target.static_distance;
+    } else {
+        s_state.target.detection_distance = 0;
+    }
 
     // Update derived states with cooldown logic
     uint32_t now = esp_timer_get_time() / 1000;  // ms
@@ -245,15 +285,17 @@ static void parse_engineering_frame(const uint8_t *data, int len) {
     // [5] = moving energy
     // [6-7] = static distance
     // [8] = static energy
-    // [9-10] = detection distance
+    // [9] = max moving gate
+    // [10] = max static gate
     // [11-24] = gate 0-13 moving energy (14 bytes)
     // [25-38] = gate 0-13 static energy (14 bytes)
     // [39] = light level
     // [40+] = tail, check
     //
     // These offsets are payload-relative. The LD2412_OFF_* constants in the
-    // header count from the frame header, 6 bytes earlier. Unlike the LD2410
-    // there is no max-gate preamble ahead of the energies.
+    // header count from the frame header, 6 bytes earlier. The max-gate
+    // preamble the LD2410 has is still present; what the LD2412 drops is the
+    // detection-distance field, which shifts the preamble from [11] to [9].
 
     if (data[0] != LD2412_DATA_TYPE_ENGINEERING || data[1] != 0xAA) {
         ESP_LOGW(TAG, "Invalid engineering frame header");
@@ -274,12 +316,18 @@ static void parse_engineering_frame(const uint8_t *data, int len) {
     s_state.target.moving_energy = data[5];
     s_state.target.static_distance = data[6] | (data[7] << 8);
     s_state.target.static_energy = data[8];
-    s_state.target.detection_distance = data[9] | (data[10] << 8);
+    /* Derived, not reported: the LD2412 drops the LD2410's detection-distance
+     * field, so take the distance of whichever target is present. */
+    if (s_state.target.target_state & LD2412_STATE_MOVING) {
+        s_state.target.detection_distance = s_state.target.moving_distance;
+    } else if (s_state.target.target_state & LD2412_STATE_STATIC) {
+        s_state.target.detection_distance = s_state.target.static_distance;
+    } else {
+        s_state.target.detection_distance = 0;
+    }
 
-    // The LD2412 frame carries no max-gate preamble, so mirror the configured
-    // range rather than reading it back out of every frame.
-    s_state.engineering.max_moving_gate = s_state.config.max_gate;
-    s_state.engineering.max_static_gate = s_state.config.max_gate;
+    s_state.engineering.max_moving_gate = data[9];
+    s_state.engineering.max_static_gate = data[10];
 
     // Parse per-gate energy values (14 gates each)
     for (int i = 0; i < LD2412_MAX_GATES; i++) {
@@ -806,13 +854,13 @@ esp_err_t ld2412_set_basic_config(uint8_t min_gate, uint8_t max_gate, uint16_t t
     if (max_gate > LD2412_MAX_GATES - 1) max_gate = LD2412_MAX_GATES - 1;
     if (max_gate < min_gate) max_gate = min_gate;
 
-    /* Where the LD2410 takes 18 bytes of (param word + 4-byte value) x 3,
-     * the LD2412 takes a flat 5-byte payload. The max gate goes on the wire
-     * one higher than its index while the min gate does not; that asymmetry
-     * is what the module expects. */
+    /* Where the LD2410 takes 18 bytes of (param word + 4-byte value) x 3, the
+     * LD2412 takes a flat 5-byte payload: min gate, max gate, 2-byte unoccupied
+     * duration, OUT pin polarity. Both gates go on the wire as-is and come back
+     * unchanged on a read; there is no offset in either direction. */
     uint8_t data[5] = {
         min_gate,
-        (uint8_t)(max_gate + 1),
+        max_gate,
         (uint8_t)(timeout_seconds & 0xFF),
         (uint8_t)((timeout_seconds >> 8) & 0xFF),
         0x01            /* OUT pin active level: low */
@@ -951,13 +999,12 @@ esp_err_t ld2412_read_config(void) {
         /* s_response_buffer[0-1] is the ACK command word and [2-3] the status,
          * so the payload starts at [4]:
          *   [4]   min gate
-         *   [5]   max gate, one higher than the index (mirrors the write)
+         *   [5]   max gate
          *   [6-7] no-one duration, little-endian
-         *   [8]   OUT pin active level
+         *   [8]   OUT pin polarity
          */
         s_state.config.min_gate = s_response_buffer[4];
-        s_state.config.max_gate = (s_response_buffer[5] > 0)
-                                ? (uint8_t)(s_response_buffer[5] - 1) : 0;
+        s_state.config.max_gate = s_response_buffer[5];
         s_state.config.timeout_seconds = s_response_buffer[6] | (s_response_buffer[7] << 8);
         s_state.config.valid = true;
 

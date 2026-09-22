@@ -105,6 +105,11 @@ extern "C" {
 #define LD2412_OFF_MOVING_ENERGY        11
 #define LD2412_OFF_STATIC_DIST_LOW      12
 #define LD2412_OFF_STATIC_ENERGY        14
+/* No detection-distance field: where the LD2410 puts one at 15-16, the
+ * LD2412 puts the max-gate preamble. The basic frame therefore carries 11
+ * in-frame bytes, not 13. */
+#define LD2412_OFF_MAX_MOVING_GATE      15
+#define LD2412_OFF_MAX_STATIC_GATE      16
 #define LD2412_OFF_MOVING_GATES         17          /* 14 bytes, gates 0-13 */
 #define LD2412_OFF_STATIC_GATES         31          /* 14 bytes, gates 0-13 */
 #define LD2412_OFF_LIGHT                45
@@ -114,6 +119,10 @@ extern "C" {
 #define LD2412_STATE_MOVING             0x01
 #define LD2412_STATE_STATIC             0x02
 #define LD2412_STATE_MOVING_AND_STATIC  0x03
+/* 0x04 and above are dynamic-background-correction status codes rather than
+ * an occupancy bitmask, so they must never be tested bitwise: 0x05 would
+ * read as a moving target and 0x06 as a static one. */
+#define LD2412_STATE_BG_FIRST           0x04
 
 /* ============================================================================
  * DATA STRUCTURES
@@ -150,6 +159,7 @@ typedef struct {
  */
 typedef struct {
     uint8_t target_state;       // 0=none, 1=moving, 2=static, 3=both
+    uint8_t bg_correction_state;// Raw state byte when >= 0x04, else 0
     uint16_t moving_distance;   // Moving target distance in cm
     uint8_t moving_energy;      // Moving target energy (0-100)
     uint16_t static_distance;   // Static target distance in cm
