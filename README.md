@@ -33,9 +33,9 @@
 >   the minimum to gate 1.
 > - **Dynamic background correction** (`background_correction`). Write it to
 >   have the module learn the fixed clutter in front of it and subtract it.
->   Leave the area empty while it runs, which takes a few seconds. This is
->   worth knowing about if you mount the sensor inside an enclosure with
->   anything rigid in its near field.
+>   Leave the area empty while it runs; the module takes about 10s and stores
+>   the result itself. Worth knowing about if you mount the sensor inside an
+>   enclosure with anything rigid in its near field.
 >
 > Because the model ID differs, Zigbee2MQTT picks the right converter by
 > itself and an already-paired LD2410 device is untouched.
