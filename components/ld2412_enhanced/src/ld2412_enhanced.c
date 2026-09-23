@@ -126,27 +126,13 @@ static void parse_basic_frame(const uint8_t *data, int len) {
      * code and treat the frame as reporting nobody - which is what the module
      * expects the room to be while a correction runs. */
     if (s_state.target.target_state >= LD2412_STATE_BG_FIRST) {
-        if (s_state.bg_correction_state != s_state.target.target_state) {
+        if (s_state.target.bg_correction_state != s_state.target.target_state) {
             ESP_LOGI(TAG, "Background correction status: 0x%02X", s_state.target.target_state);
         }
-        s_state.bg_correction_state = s_state.target.target_state;
+        s_state.target.bg_correction_state = s_state.target.target_state;
         s_state.target.target_state = LD2412_STATE_NO_TARGET;
     } else {
-        s_state.bg_correction_state = 0;
-    }
-
-    /* Values of 0x04 and up report dynamic-background-correction progress, not
-     * targets. Left alone they would be read as occupancy bits, so record the
-     * code and treat the frame as reporting nobody - which is what the module
-     * expects the room to be while a correction runs. */
-    if (s_state.target.target_state >= LD2412_STATE_BG_FIRST) {
-        if (s_state.bg_correction_state != s_state.target.target_state) {
-            ESP_LOGI(TAG, "Background correction status: 0x%02X", s_state.target.target_state);
-        }
-        s_state.bg_correction_state = s_state.target.target_state;
-        s_state.target.target_state = LD2412_STATE_NO_TARGET;
-    } else {
-        s_state.bg_correction_state = 0;
+        s_state.target.bg_correction_state = 0;
     }
     s_state.target.moving_distance = data[3] | (data[4] << 8);
     s_state.target.moving_energy = data[5];
@@ -312,6 +298,20 @@ static void parse_engineering_frame(const uint8_t *data, int len) {
 
     // Parse basic data first (same as normal mode)
     s_state.target.target_state = data[2];
+
+    /* Values of 0x04 and up report dynamic-background-correction progress, not
+     * targets. Left alone they would be read as occupancy bits, so record the
+     * code and treat the frame as reporting nobody - which is what the module
+     * expects the room to be while a correction runs. */
+    if (s_state.target.target_state >= LD2412_STATE_BG_FIRST) {
+        if (s_state.target.bg_correction_state != s_state.target.target_state) {
+            ESP_LOGI(TAG, "Background correction status: 0x%02X", s_state.target.target_state);
+        }
+        s_state.target.bg_correction_state = s_state.target.target_state;
+        s_state.target.target_state = LD2412_STATE_NO_TARGET;
+    } else {
+        s_state.target.bg_correction_state = 0;
+    }
     s_state.target.moving_distance = data[3] | (data[4] << 8);
     s_state.target.moving_energy = data[5];
     s_state.target.static_distance = data[6] | (data[7] << 8);
