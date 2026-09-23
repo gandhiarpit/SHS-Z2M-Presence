@@ -18,11 +18,13 @@
 > | Converter | `shs01_enhanced.{js,mjs}` | `shs01_ld2412.{js,mjs}` |
 > | Firmware | v1.1.1 | v2.0.0 |
 >
-> **The LD2412 is not a drop-in.** It is a different 6-pin, 20x20mm module
-> (OUT, TX, RX, 5V, 3V3, GND - power it from 5V *or* 3V3, never both), so it
-> needs its own cable and does not fit the LD2410C footprint on the community
-> PCB. In exchange it reaches about 9m across +/-75 degrees rather than ~6m
-> across +/-60, and it detects stationary people more reliably.
+> **The LD2412 is not a drop-in.** Per Hi-Link's own dimension drawing it is a
+> 28 mm board with **seven pads split across two opposite edges** - `OUT`,
+> `GND`, `+5V` on one side and `TX`, `RX`, `GND`, `3V3` on the other - where
+> the LD2410C has a single five-pin header. Power it from `+5V` *or* `3V3`,
+> never both. It needs its own cable, and it does not fit the LD2410C footprint
+> on the community PCB. In exchange it reaches about 9m across +/-75 degrees
+> rather than ~6m across +/-60, and it detects stationary people more reliably.
 >
 > Two things are new on this branch:
 >
@@ -97,7 +99,15 @@ Pair the custom PCB with Rune's adjustable ceiling mount case for a clean, finis
 
 For a DIY build on a bare ESP32-C6 development board.
 
-![ESP32-C6 Wiring Diagram](docs/esp32-c6-wiring.webp)
+![ESP32-C6 + LD2412 + LD2450 wiring](docs/ld2412-wiring.svg)
+
+> The pad order above is taken from Figure 6 of the Hi-Link LD2412 manual and
+> matches the module silkscreen: `OUT` `GND` `+5V` down one edge, `TX` `RX`
+> `GND` `3V3` down the other. Note that the **power and UART pads are on
+> opposite edges**, and that the pad spacing is not a uniform 2.54 mm - measure
+> before you make a connector. The drawing is schematic, not to scale.
+> `docs/esp32-c6-wiring.webp` is the original photo for the LD2410C build and
+> is kept on the `main` branch.
 
 #### LD2412
 
