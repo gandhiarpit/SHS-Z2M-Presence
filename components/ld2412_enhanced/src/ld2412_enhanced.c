@@ -863,7 +863,7 @@ esp_err_t ld2412_set_basic_config(uint8_t min_gate, uint8_t max_gate, uint16_t t
         max_gate,
         (uint8_t)(timeout_seconds & 0xFF),
         (uint8_t)((timeout_seconds >> 8) & 0xFF),
-        0x01            /* OUT pin active level: low */
+        0x00            /* OUT pin: presence = high, the module default */
     };
 
     esp_err_t err = enable_config();

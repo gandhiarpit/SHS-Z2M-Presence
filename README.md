@@ -99,11 +99,40 @@ For a DIY build on a bare ESP32-C6 development board.
 
 ![ESP32-C6 Wiring Diagram](docs/esp32-c6-wiring.webp)
 
-#### LD2410C
-- TX (LD2410C) → GPIO4 (RX1) on ESP32-C6
-- RX (LD2410C) → GPIO5 (TX1) on ESP32-C6
-- VCC → 5V
-- GND → GND
+#### LD2412
+
+- **TX** (LD2412) → **GPIO4** (RX1) on ESP32-C6
+- **RX** (LD2412) → **GPIO5** (TX1) on ESP32-C6
+- **+5V** → 5V *(or* **3V3** *→ 3.3V — pick one, never both)*
+- **GND** → GND
+- **OUT** → leave unconnected
+
+Logic levels are 3.3 V, so the module connects straight to the ESP32-C6 with no
+level shifting.
+
+The pins and their functions, from Table 1 of the Hi-Link LD2412 manual:
+
+| Symbol | Name | Function |
+|---|---|---|
+| `+5V` | 5V power input | Power input 5 V — use this **or** `3V3`, not both |
+| `3V3` | 3.3V power input | Power input 3.3 V — use this **or** `+5V`, not both |
+| `GND` | Power ground | Ground (the module has two ground pads) |
+| `TX` | Serial Tx | Module transmits → ESP32 RX |
+| `RX` | Serial Rx | Module receives ← ESP32 TX |
+| `OUT` | Target state output | Presence high / absence low by default, polarity settable by command. Unused here |
+
+> ⚠️ **Count the pins from the module's own silkscreen.** The table above is the
+> function of each *named* pin; it is not a left-to-right order. The physical
+> order is only given as a diagram in the Hi-Link manual, and getting it wrong is
+> how the LD2410B/C swap bites people — reusing a cable built for a different
+> module puts `OUT` where `TX` is expected. The symptom is total silence rather
+> than garbage, because a static presence line has no UART start bits, and it
+> shows up in the serial log as
+> `LD2412: Status: bytes=0, frames=0, parse_err=0, uart_err=0, conn=0`.
+
+> **The LD2412 runs at 115200 baud, not the LD2410's 256000.** That is handled by
+> this branch's firmware and is nothing you wire, but it does mean an LD2410
+> image will not talk to an LD2412 and vice versa.
 
 #### LD2450
 - TX (LD2450) → GPIO19 (RX0) on ESP32-C6
@@ -151,11 +180,23 @@ boards carry their own anyway). Pins are set in
 > reads at or near zero, since window glass blocks most UVB; it is most useful on a
 > sensor that can see outside.
 
-#### LD2410B instead of LD2410C
+#### Coming from an LD2410B or LD2410C
 
-The LD2410, LD2410B and LD2410C all speak the same Hi-Link serial protocol at 256000
-baud, so the firmware runs on any of them with **no changes** — but the pin order is
-different, so do not reuse an LD2410C cable.
+The LD2412 is **not** a drop-in for either. It is a different module on a different
+footprint speaking a different baud rate, so you need this branch's firmware, a new
+cable, and somewhere other than the community PCB's LD2410C cutout to mount it.
+
+| | LD2410 / B / C | LD2412 |
+|---|---|---|
+| Baud | 256000 | **115200** |
+| Supply | 5 V | 5 V **or** 3.3 V |
+| Distance gates | 9 | **14** |
+| Detection angle | approx. ±75° | approx. **±75°** |
+| Usable range | approx. 0.75 m to 9 m | approx. **9 m** |
+| Firmware | `main` branch | **this branch** |
+
+What follows is the LD2410B pinout, kept for reference if you are wiring the older
+module against the `main` branch.
 
 | LD2410B pin | Name | Function | Connect to |
 |---|---|---|---|
@@ -200,9 +241,9 @@ The 4 antenna patches (gold squares) must be positioned at the **top** of the en
 
 > ⚠️ **Important**: Incorrect sensor orientation will result in inverted target coordinates in the [SHS Z2M Presence Zones Add-on](https://github.com/notownblues/SHS-Z2M-Presence-Zones).
 
-### LD2410B / LD2410C Placement
+### LD2412 Placement
 
-The LD2410's etched patch-antenna face — not the side carrying the components and shield
+The radar's etched patch-antenna face — not the side carrying the components and shield
 — must point at the detection area, with the space in front open and unobstructed.
 
 | Parameter | Value |
