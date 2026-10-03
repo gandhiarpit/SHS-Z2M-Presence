@@ -13,6 +13,10 @@
  * - For zone configuration in web app
  * - Disable when not configuring to reduce Zigbee traffic
  *
+ * OTA Updates (firmware v1.2.0+):
+ * - Set ota.zigbee_ota_override_index_location in configuration.yaml (see README)
+ * - Re-interview the device once after flashing v1.2.0 so Z2M sees the OTA cluster
+ *
  * Place this file in: zigbee2mqtt/data/external_converters/shs01_enhanced.js
  */
 
@@ -185,6 +189,19 @@ const definition = {
             endpoints: [
                 {ID: 1, profileID: 0x0104, deviceID: 0x0100,
                  inputClusters: [0x0000, 0x0003, 0x0006, 0xFDCD], outputClusters: []},
+                {ID: 2, profileID: 0x0104, deviceID: 0x0107,
+                 inputClusters: [0x0406], outputClusters: []},
+                {ID: 4, profileID: 0x0104, deviceID: 0x000C,
+                 inputClusters: [0x0000, 0x000C], outputClusters: []},
+            ],
+        },
+        // v1.2.0+: OTA Upgrade client (0x0019) on EP1
+        {
+            type: 'router',
+            manufacturerName: 'SmartHomeScene',
+            endpoints: [
+                {ID: 1, profileID: 0x0104, deviceID: 0x0100,
+                 inputClusters: [0x0000, 0x0003, 0x0006, 0xFDCD], outputClusters: [0x0019]},
                 {ID: 2, profileID: 0x0104, deviceID: 0x0107,
                  inputClusters: [0x0406], outputClusters: []},
                 {ID: 4, profileID: 0x0104, deviceID: 0x000C,
@@ -744,6 +761,9 @@ const definition = {
     meta: {
         multiEndpoint: true,
     },
+
+    // Firmware v1.2.0+ updates over Zigbee - requires the OTA index in configuration.yaml (see README)
+    ota: true,
 
     endpoint: (device) => {
         return {

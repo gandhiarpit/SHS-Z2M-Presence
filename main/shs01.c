@@ -25,6 +25,7 @@
 #include "freertos/queue.h"
 #include "driver/gpio.h"
 #include "esp_timer.h"
+#include "esp_ota_ops.h"
 
 #include "shs01.h"
 #include "ld2410_enhanced.h"
@@ -136,6 +137,7 @@ static volatile bool shs_zb_ready = false;
 static volatile bool shs_zb_connected = false;
 static volatile bool shs_zb_rejoin_pending = false;  /* Prevents multiple concurrent rejoin attempts */
 static uint32_t shs_last_successful_tx = 0;
+static volatile bool shs_ota_active = false;  /* OTA download in progress - suppresses rejoin logic */
 #define SHS_ZB_LOCK_TIMEOUT_MS     100    /* Timeout for Zigbee lock acquisition */
 #define SHS_ZB_CONNECTIVITY_CHECK_MS  60000  /* Check connectivity every 60s */
 
@@ -1920,11 +1922,229 @@ static esp_err_t shs_zb_attribute_handler(const esp_zb_zcl_set_attr_value_messag
     return ESP_OK;
 }
 
-static esp_err_t shs_zb_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message) {
-    if (callback_id == ESP_ZB_CORE_SET_ATTR_VALUE_CB_ID) {
-        return shs_zb_attribute_handler((const esp_zb_zcl_set_attr_value_message_t *)message);
+/* ============================================================================
+ * OTA UPGRADE (CLIENT)
+ * ============================================================================ */
+
+#define SHS_OTA_ELEMENT_HEADER_LEN   6       /* Sub-element tag: u16 tag id + u32 length */
+#define SHS_OTA_TAG_UPGRADE_IMAGE    0x0000
+
+static const esp_partition_t *shs_ota_partition = NULL;
+static esp_ota_handle_t shs_ota_handle = 0;
+static uint32_t shs_ota_total_size = 0;      /* Image size after the 56-byte OTA file header */
+static uint32_t shs_ota_offset = 0;          /* Bytes received so far (including the tag header) */
+static bool shs_ota_tag_received = false;
+static uint8_t shs_ota_last_pct_logged = 0;
+static esp_timer_handle_t shs_ota_rollback_timer = NULL;
+
+static void shs_ota_reset_state(void) {
+    if (shs_ota_handle) {
+        esp_ota_abort(shs_ota_handle);
+    }
+    shs_ota_handle = 0;
+    shs_ota_partition = NULL;
+    shs_ota_total_size = 0;
+    shs_ota_offset = 0;
+    shs_ota_tag_received = false;
+    shs_ota_last_pct_logged = 0;
+    shs_ota_active = false;
+}
+
+/* Strip the sub-element tag header from the first block(s) and return the firmware bytes */
+static esp_err_t shs_ota_element_data(uint32_t total_size, const void *payload, uint16_t payload_size,
+                                      const void **outbuf, uint16_t *outlen) {
+    if (!shs_ota_tag_received) {
+        if (payload_size <= SHS_OTA_ELEMENT_HEADER_LEN) {
+            ESP_LOGE(SHS_TAG, "OTA: first block too small (%u bytes)", payload_size);
+            return ESP_ERR_INVALID_SIZE;
+        }
+        const uint8_t *p = (const uint8_t *)payload;
+        uint16_t tag_id = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+        uint32_t length = (uint32_t)p[2] | ((uint32_t)p[3] << 8) | ((uint32_t)p[4] << 16) | ((uint32_t)p[5] << 24);
+        if (tag_id != SHS_OTA_TAG_UPGRADE_IMAGE || (length + SHS_OTA_ELEMENT_HEADER_LEN) != total_size) {
+            ESP_LOGE(SHS_TAG, "OTA: bad sub-element (tag 0x%04x, length %lu, image size %lu)",
+                     tag_id, (unsigned long)length, (unsigned long)total_size);
+            return ESP_ERR_INVALID_ARG;
+        }
+        shs_ota_tag_received = true;
+        *outbuf = p + SHS_OTA_ELEMENT_HEADER_LEN;
+        *outlen = payload_size - SHS_OTA_ELEMENT_HEADER_LEN;
+    } else {
+        *outbuf = payload;
+        *outlen = payload_size;
     }
     return ESP_OK;
+}
+
+static esp_err_t shs_zb_ota_upgrade_handler(const esp_zb_zcl_ota_upgrade_value_message_t *message) {
+    esp_err_t ret = ESP_OK;
+
+    if (message->info.status != ESP_ZB_ZCL_STATUS_SUCCESS) {
+        ESP_LOGW(SHS_TAG, "OTA: callback status 0x%x", message->info.status);
+        return ESP_OK;
+    }
+
+    switch (message->upgrade_status) {
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_START:
+        ESP_LOGI(SHS_TAG, "OTA: start - version 0x%08lx, type 0x%04x, manuf 0x%04x, size %lu",
+                 (unsigned long)message->ota_header.file_version, message->ota_header.image_type,
+                 message->ota_header.manufacturer_code, (unsigned long)message->ota_header.image_size);
+        shs_ota_reset_state();
+        shs_ota_partition = esp_ota_get_next_update_partition(NULL);
+        if (shs_ota_partition == NULL) {
+            ESP_LOGE(SHS_TAG, "OTA: no update partition (is the OTA partition table flashed?)");
+            return ESP_FAIL;
+        }
+        ret = esp_ota_begin(shs_ota_partition, OTA_WITH_SEQUENTIAL_WRITES, &shs_ota_handle);
+        if (ret != ESP_OK) {
+            ESP_LOGE(SHS_TAG, "OTA: esp_ota_begin failed (%s)", esp_err_to_name(ret));
+            shs_ota_handle = 0;
+            shs_ota_reset_state();
+            return ret;
+        }
+        shs_ota_active = true;
+        ESP_LOGI(SHS_TAG, "OTA: writing to partition '%s' at 0x%lx",
+                 shs_ota_partition->label, (unsigned long)shs_ota_partition->address);
+        break;
+
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_RECEIVE: {
+        if (!shs_ota_handle) {
+            ESP_LOGE(SHS_TAG, "OTA: data received without an active session");
+            return ESP_FAIL;
+        }
+        shs_ota_total_size = message->ota_header.image_size;
+        shs_ota_offset += message->payload_size;
+        shs_last_successful_tx = (uint32_t)(esp_timer_get_time() / 1000);
+
+        const void *buf = NULL;
+        uint16_t len = 0;
+        ret = shs_ota_element_data(shs_ota_total_size, message->payload, message->payload_size, &buf, &len);
+        if (ret == ESP_OK) {
+            ret = esp_ota_write(shs_ota_handle, buf, len);
+        }
+        if (ret != ESP_OK) {
+            ESP_LOGE(SHS_TAG, "OTA: write failed at offset %lu (%s)",
+                     (unsigned long)shs_ota_offset, esp_err_to_name(ret));
+            shs_ota_reset_state();
+            return ret;
+        }
+
+        uint8_t pct = shs_ota_total_size ? (uint8_t)((uint64_t)shs_ota_offset * 100 / shs_ota_total_size) : 0;
+        if (pct >= shs_ota_last_pct_logged + 10) {
+            shs_ota_last_pct_logged = pct - (pct % 10);
+            ESP_LOGI(SHS_TAG, "OTA: %u%% (%lu / %lu bytes)", pct,
+                     (unsigned long)shs_ota_offset, (unsigned long)shs_ota_total_size);
+        }
+        break;
+    }
+
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_APPLY:
+        ESP_LOGI(SHS_TAG, "OTA: apply");
+        break;
+
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_CHECK:
+        if (shs_ota_offset != shs_ota_total_size || !shs_ota_tag_received) {
+            ESP_LOGE(SHS_TAG, "OTA: size check failed (%lu / %lu bytes)",
+                     (unsigned long)shs_ota_offset, (unsigned long)shs_ota_total_size);
+            shs_ota_reset_state();
+            return ESP_FAIL;
+        }
+        ESP_LOGI(SHS_TAG, "OTA: download complete (%lu bytes)", (unsigned long)shs_ota_total_size);
+        break;
+
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_FINISH:
+        if (!shs_ota_handle) {
+            ESP_LOGE(SHS_TAG, "OTA: finish without an active session");
+            return ESP_FAIL;
+        }
+        ret = esp_ota_end(shs_ota_handle);  /* Validates the app image */
+        shs_ota_handle = 0;
+        if (ret == ESP_OK) {
+            ret = esp_ota_set_boot_partition(shs_ota_partition);
+        }
+        if (ret != ESP_OK) {
+            ESP_LOGE(SHS_TAG, "OTA: image rejected (%s)", esp_err_to_name(ret));
+            shs_ota_reset_state();
+            return ret;
+        }
+        ESP_LOGW(SHS_TAG, "OTA: new firmware 0x%08lx installed - restarting",
+                 (unsigned long)message->ota_header.file_version);
+        esp_restart();
+        break;
+
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_ABORT:
+        ESP_LOGW(SHS_TAG, "OTA: aborted at %lu / %lu bytes",
+                 (unsigned long)shs_ota_offset, (unsigned long)shs_ota_total_size);
+        shs_ota_reset_state();
+        break;
+
+    default:
+        ESP_LOGI(SHS_TAG, "OTA: status %d", message->upgrade_status);
+        break;
+    }
+    return ret;
+}
+
+static esp_err_t shs_zb_ota_query_resp_handler(const esp_zb_zcl_ota_upgrade_query_image_resp_message_t *message) {
+    if (message->info.status != ESP_ZB_ZCL_STATUS_SUCCESS) {
+        ESP_LOGD(SHS_TAG, "OTA: query image response status 0x%x", message->info.status);
+        return ESP_OK;
+    }
+    ESP_LOGI(SHS_TAG, "OTA: server 0x%04x offers version 0x%08lx, type 0x%04x, manuf 0x%04x, size %lu",
+             message->server_addr.u.short_addr, (unsigned long)message->file_version,
+             message->image_type, message->manufacturer_code, (unsigned long)message->image_size);
+    if (message->image_type != SHS_OTA_IMAGE_TYPE || message->manufacturer_code != SHS_OTA_MANUFACTURER_CODE) {
+        ESP_LOGW(SHS_TAG, "OTA: image not for this device - rejected");
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+/* Mark a freshly OTA'd image as good once it is back on the network */
+static void shs_ota_confirm_running_app(void) {
+    if (shs_ota_rollback_timer == NULL) {
+        return;
+    }
+    esp_timer_stop(shs_ota_rollback_timer);
+    esp_timer_delete(shs_ota_rollback_timer);
+    shs_ota_rollback_timer = NULL;
+    esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+    ESP_LOGI(SHS_TAG, "OTA: new firmware confirmed (%s)", esp_err_to_name(err));
+}
+
+static void shs_ota_rollback_timer_cb(void *arg) {
+    ESP_LOGE(SHS_TAG, "OTA: new firmware did not rejoin within %d s - rolling back",
+             SHS_OTA_ROLLBACK_CONFIRM_MS / 1000);
+    esp_ota_mark_app_invalid_rollback_and_reboot();
+}
+
+static void shs_ota_check_pending_verify(void) {
+    esp_ota_img_states_t state;
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (esp_ota_get_state_partition(running, &state) != ESP_OK || state != ESP_OTA_IMG_PENDING_VERIFY) {
+        return;
+    }
+    ESP_LOGW(SHS_TAG, "OTA: running new firmware from '%s' - pending verification", running->label);
+    const esp_timer_create_args_t args = {
+        .callback = shs_ota_rollback_timer_cb,
+        .name = "shs_ota_rollback",
+    };
+    if (esp_timer_create(&args, &shs_ota_rollback_timer) == ESP_OK) {
+        esp_timer_start_once(shs_ota_rollback_timer, (uint64_t)SHS_OTA_ROLLBACK_CONFIRM_MS * 1000);
+    }
+}
+
+static esp_err_t shs_zb_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message) {
+    switch (callback_id) {
+    case ESP_ZB_CORE_SET_ATTR_VALUE_CB_ID:
+        return shs_zb_attribute_handler((const esp_zb_zcl_set_attr_value_message_t *)message);
+    case ESP_ZB_CORE_OTA_UPGRADE_VALUE_CB_ID:
+        return shs_zb_ota_upgrade_handler((const esp_zb_zcl_ota_upgrade_value_message_t *)message);
+    case ESP_ZB_CORE_OTA_UPGRADE_QUERY_IMAGE_RESP_CB_ID:
+        return shs_zb_ota_query_resp_handler((const esp_zb_zcl_ota_upgrade_query_image_resp_message_t *)message);
+    default:
+        return ESP_OK;
+    }
 }
 
 /* ============================================================================
@@ -2225,7 +2445,8 @@ static void shs_ld2450_task(void *pvParameters) {
 
             /* Check if we haven't had a successful TX in a while (3 minutes) */
             /* This should now only trigger if heartbeat also fails */
-            if (time_since_last_tx > 180000 && shs_last_successful_tx > 0 && !shs_zb_rejoin_pending) {
+            if (time_since_last_tx > 180000 && shs_last_successful_tx > 0 && !shs_zb_rejoin_pending &&
+                !shs_ota_active) {
                 ESP_LOGW(SHS_TAG, "Zigbee: No successful TX for %lu ms (even heartbeat failed) - scheduling rejoin",
                          (unsigned long)time_since_last_tx);
                 ESP_LOGW(SHS_TAG, "Zigbee: consecutive lock fails: %lu", (unsigned long)shs_lock_consecutive_fails);
@@ -2322,6 +2543,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct) {
             } else {
                 ESP_LOGI(SHS_TAG, "Device rebooted - already joined network");
                 shs_zb_connected = true;
+                shs_ota_confirm_running_app();
                 /* Device already joined - force update sensor states now */
                 shs_ld2410c_force_update();
                 shs_ld2450_force_update();
@@ -2339,6 +2561,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct) {
                      esp_zb_get_pan_id(), esp_zb_get_current_channel());
             shs_zb_connected = true;
             shs_zb_rejoin_pending = false;  /* Clear rejoin flag on successful join */
+            shs_ota_confirm_running_app();
             shs_last_successful_tx = (uint32_t)(esp_timer_get_time() / 1000);
             /* Device just joined - force update sensor states now */
             shs_ld2410c_force_update();
@@ -2584,6 +2807,26 @@ static void shs_zigbee_task(void *pvParameters) {
         }
 
         esp_zb_cluster_list_add_custom_cluster(cl, cfg_cl, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+
+        /* OTA Upgrade client - Z2M serves images from its OTA index */
+        esp_zb_ota_cluster_cfg_t ota_cfg = {
+            .ota_upgrade_file_version = SHS_OTA_FILE_VERSION,
+            .ota_upgrade_downloaded_file_ver = SHS_OTA_FILE_VERSION,
+            .ota_upgrade_manufacturer = SHS_OTA_MANUFACTURER_CODE,
+            .ota_upgrade_image_type = SHS_OTA_IMAGE_TYPE,
+        };
+        esp_zb_attribute_list_t *ota_cl = esp_zb_ota_cluster_create(&ota_cfg);
+        esp_zb_zcl_ota_upgrade_client_variable_t ota_client = {
+            .timer_query = ESP_ZB_ZCL_OTA_UPGRADE_QUERY_TIMER_COUNT_DEF,
+            .hw_version = SHS_OTA_HW_VERSION,
+            .max_data_size = SHS_OTA_MAX_DATA_SIZE,
+        };
+        uint16_t ota_server_addr = 0xffff;
+        uint8_t ota_server_ep = 0xff;
+        esp_zb_ota_cluster_add_attr(ota_cl, ESP_ZB_ZCL_ATTR_OTA_UPGRADE_CLIENT_DATA_ID, &ota_client);
+        esp_zb_ota_cluster_add_attr(ota_cl, ESP_ZB_ZCL_ATTR_OTA_UPGRADE_SERVER_ADDR_ID, &ota_server_addr);
+        esp_zb_ota_cluster_add_attr(ota_cl, ESP_ZB_ZCL_ATTR_OTA_UPGRADE_SERVER_ENDPOINT_ID, &ota_server_ep);
+        esp_zb_cluster_list_add_ota_cluster(cl, ota_cl, ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE);
 
         esp_zb_endpoint_config_t ep_cfg = {
             .endpoint = SHS_EP_LIGHT,
@@ -3177,6 +3420,9 @@ void app_main(void) {
         nvs_rc = nvs_flash_init();
     }
     ESP_ERROR_CHECK(nvs_rc);
+
+    /* After an OTA update, arm the rollback timer until the new image rejoins */
+    shs_ota_check_pending_verify();
 
     /* Load configuration from NVS */
     shs_cfg_load_from_nvs();

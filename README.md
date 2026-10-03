@@ -135,7 +135,7 @@ The 4 antenna patches (gold squares) must be positioned at the **top** of the en
 
   The easiest way to flash the firmware (no development environment needed).
 
-  1. Download `SHS01_vX.X.X_merged.bin` from the [Releases page](https://github.com/notownblues/SHS-Z2M-Presence/releases)
+  1. Download `SHS_Z2M_Presence_vX.X.X_merged.bin` from the [Releases page](https://github.com/notownblues/SHS-Z2M-Presence/releases)
 
   2. Go to [ESPHome Web Tool](https://web.esphome.io/)
 
@@ -148,6 +148,8 @@ The 4 antenna patches (gold squares) must be positioned at the **top** of the en
   6. Click **"INSTALL"** and wait for completion (~15 seconds)
 
   > **Tip:** If the device isn't detected, hold the **BOOT** button while plugging in the USB cable, then try again.
+
+  > **Note:** From v1.2.0 the firmware uses a 4MB flash layout with two app slots for [OTA updates](#ota-updates-via-zigbee2mqtt). Once a device runs v1.2.0 or later, it can be updated wirelessly from Zigbee2MQTT instead of over USB.
 
   ### Option 2: Build from Source
 
@@ -187,6 +189,37 @@ Download the correct converter from the [Releases page](https://github.com/notow
 Restart Zigbee2MQTT for the changes to take effect. Your device should now expose all available entities.
 
 If some or all entities show as "Null" or "N/A", click the "Configure" button straight after pairing to refresh the states.
+
+---
+
+## OTA Updates via Zigbee2MQTT
+
+From firmware **v1.2.0**, the sensor can be updated over Zigbee from the Zigbee2MQTT **OTA** tab, so you don't have to unmount it and plug in USB.
+
+### One-time setup
+
+1. **Flash v1.2.0 over USB** using [Firmware Flashing](#firmware-flashing). Older firmware has no room for a second app slot, so this one flash must be done by cable. Every later update can go over the air.
+   > **Note:** Flashing a merged `.bin` resets the settings stored on the device (sensitivities, cooldowns, zones and room boundary) to their defaults. Zigbee pairing data is stored in a separate area that isn't touched, so the sensor normally stays paired. If it doesn't reappear in Z2M, pair it again.
+2. **Update the converter** to the v1.2.0 version (`shs01_enhanced.mjs` or `.js`) and restart Zigbee2MQTT.
+3. **Re-interview the device:** in Z2M open the device, go to **About**, and click **Interview**. Z2M learns about the OTA cluster during the interview.
+4. **Add the OTA index** to Z2M's `configuration.yaml`, then restart Zigbee2MQTT:
+   ```yaml
+   ota:
+     zigbee_ota_override_index_location: https://raw.githubusercontent.com/notownblues/SHS-Z2M-Presence/main/ota/index.json
+   ```
+
+### Updating
+
+1. In Z2M, open the **OTA** tab and click **Check for new updates** next to the sensor. Z2M also checks once a day on its own.
+2. If a newer version is listed, click **Update firmware**.
+3. Leave the sensor powered. With Z2M's default OTA settings, a full image (~700 KB) takes **about an hour**. The sensor keeps detecting and reporting during the download.
+4. When the download finishes, the sensor restarts into the new firmware and reconnects.
+
+If the download is interrupted or aborted, the sensor keeps running its current firmware. Start the update again.
+
+### Safety: automatic rollback
+
+After an OTA update, the new firmware must reconnect to your Zigbee network within 10 minutes. If it crashes or can't rejoin, the sensor automatically switches back to the previous firmware.
 
 ---
 
