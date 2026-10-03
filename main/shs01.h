@@ -71,7 +71,7 @@
 
 /* Optional Basic metadata */
 #define SHS_BASIC_DATE_CODE             "2026-10-03"
-#define SHS_BASIC_SW_BUILD_ID           "v1.0.5"
+#define SHS_BASIC_SW_BUILD_ID           "v1.1.0"
 
 /* ============================================================================
  * CLUSTER IDS
@@ -138,6 +138,12 @@
 #define SHS_ATTR_ZONE5_Y2_CFG           0x0064  /* int16, mm */
 #define SHS_ATTR_ZONE5_TARGETS_CFG      0x0065  /* uint8, 0-3, read-only */
 #define SHS_ATTR_ZONE5_TYPE_CFG         0x0066  /* uint8: per-zone type (0=off, 1=detection, 2=filter, 3=interference) */
+
+/* Room boundary (on Config cluster 0xFDCD): polygon in sensor coordinates.
+ * Targets outside it are ignored for occupancy. Point count < 3 = no boundary. */
+#define SHS_ATTR_BOUNDARY_COUNT_CFG     0x0070  /* uint8, 0-8 points */
+#define SHS_ATTR_BOUNDARY_FIRST_CFG     0x0071  /* int16 mm: x0, y0, x1, y1, ... x7, y7 */
+#define SHS_ATTR_BOUNDARY_LAST_CFG      0x0080  /* (16 attributes, 0x0071-0x0080) */
 
 /* ============================================================================
  * OCCUPANCY CLUSTER CUSTOM ATTRIBUTES (on EP2)

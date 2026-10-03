@@ -91,6 +91,8 @@ static SemaphoreHandle_t target_data_mutex = NULL;
 #define SHS_NVS_KEY_Z5_X2       "z5_x2"
 #define SHS_NVS_KEY_Z5_Y2       "z5_y2"
 #define SHS_NVS_KEY_Z5_TYPE     "z5_type"
+#define SHS_NVS_KEY_BND_COUNT   "bnd_n"
+#define SHS_NVS_KEY_BND_XY      "bnd_xy"
 
 /* ============================================================================
  * CONFIGURATION STORAGE
@@ -231,6 +233,13 @@ static int16_t shs_zone4_x2 = 1500, shs_zone4_y2 = 3000;
 static bool    shs_zone5_enabled = false;
 static int16_t shs_zone5_x1 = -1500, shs_zone5_y1 = 0;
 static int16_t shs_zone5_x2 = 1500, shs_zone5_y2 = 3000;
+
+/* Room boundary polygon (sensor coordinates, mm). Targets outside it are ignored
+ * for occupancy. Fewer than 3 points = no boundary (all targets count). */
+static uint8_t shs_boundary_count = 0;
+static int16_t shs_boundary_xy[LD2450_MAX_BOUNDARY_POINTS * 2] = {0};
+_Static_assert(SHS_ATTR_BOUNDARY_LAST_CFG - SHS_ATTR_BOUNDARY_FIRST_CFG + 1 == LD2450_MAX_BOUNDARY_POINTS * 2,
+               "Boundary attribute range must match the boundary coordinate array");
 
 /* Zone config debounce - wait for all attributes to arrive before applying */
 #define SHS_ZONE_CFG_DEBOUNCE_MS  500  /* Wait 500ms after last attribute before applying */
@@ -402,6 +411,9 @@ static void shs_zone_cfg_save_to_nvs(void) {
     nvs_set_i16(h, SHS_NVS_KEY_Z5_X2, shs_zone5_x2);
     nvs_set_i16(h, SHS_NVS_KEY_Z5_Y2, shs_zone5_y2);
     nvs_set_u8(h, SHS_NVS_KEY_Z5_TYPE, shs_zone5_type);
+    /* Room boundary */
+    nvs_set_u8(h, SHS_NVS_KEY_BND_COUNT, shs_boundary_count);
+    nvs_set_blob(h, SHS_NVS_KEY_BND_XY, shs_boundary_xy, sizeof(shs_boundary_xy));
 
     nvs_commit(h);
     nvs_close(h);
@@ -492,11 +504,21 @@ static void shs_zone_cfg_load_from_nvs(void) {
     if (nvs_get_u8(h, SHS_NVS_KEY_Z5_TYPE, &u8tmp) == ESP_OK)
         shs_zone5_type = u8tmp;
 
+    /* Room boundary */
+    size_t bnd_len = sizeof(shs_boundary_xy);
+    if (nvs_get_u8(h, SHS_NVS_KEY_BND_COUNT, &u8tmp) == ESP_OK &&
+        nvs_get_blob(h, SHS_NVS_KEY_BND_XY, shs_boundary_xy, &bnd_len) == ESP_OK &&
+        bnd_len == sizeof(shs_boundary_xy)) {
+        shs_boundary_count = (u8tmp > LD2450_MAX_BOUNDARY_POINTS) ? LD2450_MAX_BOUNDARY_POINTS : u8tmp;
+    } else {
+        shs_boundary_count = 0;
+    }
+
     nvs_close(h);
 
-    ESP_LOGI(SHS_TAG, "Zone config loaded: type=%d, z1=%d, z2=%d, z3=%d, z4=%d, z5=%d",
+    ESP_LOGI(SHS_TAG, "Zone config loaded: type=%d, z1=%d, z2=%d, z3=%d, z4=%d, z5=%d, boundary=%d pts",
              shs_zone_type, shs_zone1_enabled, shs_zone2_enabled, shs_zone3_enabled,
-             shs_zone4_enabled, shs_zone5_enabled);
+             shs_zone4_enabled, shs_zone5_enabled, shs_boundary_count);
 }
 
 /* Forward declaration for zone config apply */
@@ -578,7 +600,13 @@ static void shs_zone_cfg_apply_to_sensor(void) {
         ld2450_clear_zone(4);
     }
 
-    /* Apply zones to sensor (sends command to LD2450) */
+    /* Room boundary (targets outside it are ignored for occupancy) */
+    ld2450_set_boundary(shs_boundary_xy, shs_boundary_count);
+    for (int i = 0; i < shs_boundary_count && i < LD2450_MAX_BOUNDARY_POINTS; i++) {
+        ESP_LOGI(SHS_TAG, "Boundary point %d: (%d,%d)", i, shs_boundary_xy[i * 2], shs_boundary_xy[i * 2 + 1]);
+    }
+
+    /* Re-evaluate zone occupancy with the new configuration */
     ld2450_apply_zones();
 
     /* Save zone config to NVS only if changed via Zigbee (not on startup) */
@@ -943,13 +971,55 @@ static bool shs_target_in_interference_zone(int16_t x, int16_t y) {
     return false;
 }
 
+/* Check if a target is in any enabled non-interference zone. These zones take part in
+ * the global zone mode (Include/Exclude). any_zone reports whether any such zone exists. */
+static bool shs_target_in_mode_zone(int16_t x, int16_t y, bool *any_zone) {
+    const struct { bool enabled; uint8_t type; int16_t x1, y1, x2, y2; } zones[] = {
+        {shs_zone1_enabled, shs_zone1_type, shs_zone1_x1, shs_zone1_y1, shs_zone1_x2, shs_zone1_y2},
+        {shs_zone2_enabled, shs_zone2_type, shs_zone2_x1, shs_zone2_y1, shs_zone2_x2, shs_zone2_y2},
+        {shs_zone3_enabled, shs_zone3_type, shs_zone3_x1, shs_zone3_y1, shs_zone3_x2, shs_zone3_y2},
+        {shs_zone4_enabled, shs_zone4_type, shs_zone4_x1, shs_zone4_y1, shs_zone4_x2, shs_zone4_y2},
+        {shs_zone5_enabled, shs_zone5_type, shs_zone5_x1, shs_zone5_y1, shs_zone5_x2, shs_zone5_y2},
+    };
+    bool inside = false;
+    *any_zone = false;
+    for (size_t i = 0; i < sizeof(zones) / sizeof(zones[0]); i++) {
+        if (!zones[i].enabled || zones[i].type == LD2450_ZONE_INTERFERENCE) continue;
+        *any_zone = true;
+        if (shs_point_in_zone(x, y, zones[i].x1, zones[i].y1, zones[i].x2, zones[i].y2)) {
+            inside = true;
+        }
+    }
+    return inside;
+}
+
+/* Apply the global zone mode to a target: Off = all count, Include = only targets inside
+ * a zone, Exclude = only targets outside all zones. Interference zones are handled
+ * separately and don't take part. With no Include/Exclude zones, every target counts. */
+static bool shs_target_passes_zone_mode(int16_t x, int16_t y) {
+    bool any_zone = false;
+    bool in_zone = shs_target_in_mode_zone(x, y, &any_zone);
+    if (!any_zone) return true;
+
+    switch (shs_zone_type) {
+        case LD2450_ZONE_DETECTION: return in_zone;
+        case LD2450_ZONE_FILTER:    return !in_zone;
+        default:                    return true;
+    }
+}
+
 static void shs_on_ld2450_target_update(const ld2450_target_t *targets, uint8_t active_count) {
     /* Calculate effective count excluding targets in interference zones */
     uint8_t effective_count = 0;
     for (int i = 0; i < 3; i++) {
         if (is_valid_target(&targets[i]) && targets[i].active) {
-            /* Check if target is in any interference zone */
-            if (!shs_target_in_interference_zone(targets[i].x, targets[i].y)) {
+            /* Ignore targets outside the room boundary (e.g. seen through a wall) */
+            if (!ld2450_point_in_boundary(targets[i].x, targets[i].y)) {
+                continue;
+            }
+            /* Ignore targets in interference zones, then apply the zone mode (Include/Exclude) */
+            if (!shs_target_in_interference_zone(targets[i].x, targets[i].y) &&
+                shs_target_passes_zone_mode(targets[i].x, targets[i].y)) {
                 effective_count++;
             }
         }
@@ -961,7 +1031,7 @@ static void shs_on_ld2450_target_update(const ld2450_target_t *targets, uint8_t 
         if (shs_zb_set_analog_value(SHS_EP_LD2450_TARGET_COUNT, (float)effective_count) &&
             shs_zb_report_analog_attr(SHS_EP_LD2450_TARGET_COUNT)) {
             shs_ld2450_target_count = effective_count;
-            ESP_LOGI(SHS_TAG, "LD2450 target count: %d (raw: %d, filtered: %d in interference)",
+            ESP_LOGI(SHS_TAG, "LD2450 target count: %d (raw: %d, filtered: %d by boundary/interference/zone mode)",
                      effective_count, active_count, active_count - effective_count);
         } else if (shs_zb_ready) {
             ESP_LOGW(SHS_TAG, "LD2450 target count report FAILED - will retry");
@@ -1827,7 +1897,22 @@ static esp_err_t shs_zb_attribute_handler(const esp_zb_zcl_set_attr_value_messag
                 shs_zone_cfg_schedule_apply();
                 return ESP_OK;
 
+            /* Room boundary */
+            case SHS_ATTR_BOUNDARY_COUNT_CFG:
+                shs_boundary_count = (v8 > LD2450_MAX_BOUNDARY_POINTS) ? LD2450_MAX_BOUNDARY_POINTS : v8;
+                ESP_LOGI(SHS_TAG, "Boundary Points = %d", shs_boundary_count);
+                shs_zone_cfg_schedule_apply();
+                return ESP_OK;
+
             default:
+                if (message->attribute.id >= SHS_ATTR_BOUNDARY_FIRST_CFG &&
+                    message->attribute.id <= SHS_ATTR_BOUNDARY_LAST_CFG) {
+                    int idx = message->attribute.id - SHS_ATTR_BOUNDARY_FIRST_CFG;
+                    shs_boundary_xy[idx] = v16s;
+                    ESP_LOGI(SHS_TAG, "Boundary %c%d = %d", (idx % 2) ? 'Y' : 'X', idx / 2, v16s);
+                    shs_zone_cfg_schedule_apply();
+                    return ESP_OK;
+                }
                 break;
         }
     }
@@ -2489,6 +2574,14 @@ static void shs_zigbee_task(void *pvParameters) {
             ESP_ZB_ZCL_ATTR_TYPE_U8, ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, &shs_zone5_targets);
         esp_zb_custom_cluster_add_custom_attr(cfg_cl, SHS_ATTR_ZONE5_TYPE_CFG,
             ESP_ZB_ZCL_ATTR_TYPE_U8, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, &shs_zone5_type);
+
+        /* Room boundary: point count + 8 x/y pairs */
+        esp_zb_custom_cluster_add_custom_attr(cfg_cl, SHS_ATTR_BOUNDARY_COUNT_CFG,
+            ESP_ZB_ZCL_ATTR_TYPE_U8, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, &shs_boundary_count);
+        for (int i = 0; i < LD2450_MAX_BOUNDARY_POINTS * 2; i++) {
+            esp_zb_custom_cluster_add_custom_attr(cfg_cl, SHS_ATTR_BOUNDARY_FIRST_CFG + i,
+                ESP_ZB_ZCL_ATTR_TYPE_S16, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, &shs_boundary_xy[i]);
+        }
 
         esp_zb_cluster_list_add_custom_cluster(cl, cfg_cl, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 

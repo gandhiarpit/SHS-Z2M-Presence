@@ -123,6 +123,7 @@ The 4 antenna patches (gold squares) must be positioned at the **top** of the en
 - **Multi-Zone Support**: Up to 5 configurable zones with different operation modes
 - **Multi-Target Tracking**: Track up to 3 simultaneous targets with X/Y positions
 - **Zone Types**: Detection (inclusion), Filter (exclusion), and Interference (false positive filtering)
+- **Room Boundary**: Ignore targets outside your room's outline (up to 8 corners), without using a zone
 - **Zigbee Router Mode**: Stable connection that also extends your Zigbee mesh
 - **Persistent Configuration**: Zone settings saved to flash memory
 
@@ -276,6 +277,22 @@ The sensor supports 4 zone operation modes:
 | **Detection** | Only detect targets INSIDE zones | Focus on specific areas (bed, desk, couch) |
 | **Filter** | Ignore targets INSIDE zones | Exclude areas (doorways, windows with moving curtains) |
 | **Interference** | Treat targets as false positives | Filter reflections and sensor artifacts |
+
+The global **Zone Mode** (Off / Include / Exclude) decides how Detection zones affect the main occupancy:
+
+- **Off**: every target counts.
+- **Include**: only targets inside a Detection zone count.
+- **Exclude**: only targets outside all Detection zones count.
+
+Interference zones are always ignored, whatever the mode. If no Detection zones are enabled, every target outside Interference zones counts.
+
+## Room Boundary
+
+Since firmware v1.1.0 the sensor can ignore targets outside a room outline, for example people seen through a wall. Draw it with the Room Outline tool in the [Zone Configurator add-on](https://github.com/notownblues/SHS-Z2M-Presence-Zones) and click Save to Sensor.
+
+Targets outside the outline don't count towards occupancy, the target count, zone occupancy, or the LD2410C cross-check. Position reporting still shows them, so the add-on can draw them faded. The outline is stored in flash and doesn't use any of the 5 zones.
+
+Zigbee attributes (Config cluster `0xFDCD`, endpoint 1): `0x0070` point count (uint8, below 3 = off) and `0x0071`-`0x0080` the x/y of up to 8 points (int16, mm, sensor coordinates). The converter accepts them as `zone_config.boundary: [{x, y}, ...]`.
 
 ---
 

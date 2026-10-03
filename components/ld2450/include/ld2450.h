@@ -43,6 +43,9 @@ extern "C" {
 #define LD2450_MAX_TARGETS          3
 #define LD2450_MAX_ZONES            5
 
+/* Room boundary: polygon (sensor coordinates) outside which targets are ignored */
+#define LD2450_MAX_BOUNDARY_POINTS  8
+
 /* Coordinate system limits (millimeters) */
 #define LD2450_X_MIN                -3000
 #define LD2450_X_MAX                3000
@@ -347,6 +350,24 @@ uint16_t ld2450_calc_angle(int16_t x, int16_t y);
  * @return true if point is inside zone
  */
 bool ld2450_point_in_zone(int16_t x, int16_t y, const ld2450_zone_t *zone);
+
+/**
+ * @brief Set the room boundary polygon (sensor coordinates, mm)
+ *
+ * Targets outside the boundary are ignored for zone occupancy, and
+ * ld2450_point_in_boundary() lets the application ignore them for overall
+ * occupancy too. Must be called from the same task that calls ld2450_process().
+ *
+ * @param xy    Interleaved vertex coordinates: x0, y0, x1, y1, ... (count * 2 values)
+ * @param count Number of vertices (max LD2450_MAX_BOUNDARY_POINTS); fewer than 3 disables the boundary
+ */
+void ld2450_set_boundary(const int16_t *xy, uint8_t count);
+
+/**
+ * @brief Check if point is inside the room boundary
+ * @return true if inside the boundary, or if no boundary is set
+ */
+bool ld2450_point_in_boundary(int16_t x, int16_t y);
 
 /**
  * @brief Get string representation of zone type

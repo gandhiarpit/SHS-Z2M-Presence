@@ -94,6 +94,11 @@ const ATTR_ZONE3_TYPE_CFG = 0x0046;
 const ATTR_ZONE4_TYPE_CFG = 0x0056;
 const ATTR_ZONE5_TYPE_CFG = 0x0066;
 
+// Room boundary: polygon in sensor coordinates, targets outside are ignored
+const ATTR_BOUNDARY_COUNT_CFG = 0x0070;  // uint8, 0-8 points (< 3 = no boundary)
+const ATTR_BOUNDARY_FIRST_CFG = 0x0071;  // int16 x0, y0, x1, y1, ... x7, y7 (0x0071-0x0080)
+const BOUNDARY_MAX_POINTS = 8;
+
 // Zone 4 configuration attributes
 const ATTR_ZONE4_ENABLED = 0x0050;
 const ATTR_ZONE4_X1_CFG = 0x0051;
@@ -520,6 +525,32 @@ const definition = {
                         } catch (e) {
                             console.log(`SHS01 ZONE: Failed to write ${attrKey}:`, e.message);
                         }
+                    }
+                }
+
+                // Room boundary: array of up to 8 {x, y} points (sensor coordinates, mm).
+                // Fewer than 3 points disables it. Points are written before the count;
+                // the firmware applies the whole configuration after a short debounce.
+                if (Array.isArray(value.boundary)) {
+                    const points = value.boundary.slice(0, BOUNDARY_MAX_POINTS);
+                    const count = points.length >= 3 ? points.length : 0;
+                    const toInt16 = (v) => Math.max(-32768, Math.min(32767, Math.round(Number(v) || 0)));
+                    for (let i = 0; i < count; i++) {
+                        const coords = [toInt16(points[i].x), toInt16(points[i].y)];
+                        for (let c = 0; c < 2; c++) {
+                            const attrId = ATTR_BOUNDARY_FIRST_CFG + i * 2 + c;
+                            try {
+                                await endpoint.write(CLUSTER_CONFIG, {[attrId]: {value: coords[c], type: 0x29}});
+                            } catch (e) {
+                                console.log(`SHS01 ZONE: Failed to write boundary point ${i}:`, e.message);
+                            }
+                        }
+                    }
+                    try {
+                        await endpoint.write(CLUSTER_CONFIG, {[ATTR_BOUNDARY_COUNT_CFG]: {value: count, type: 0x20}});
+                        console.log(`SHS01 ZONE: Written boundary (${count} points)`);
+                    } catch (e) {
+                        console.log(`SHS01 ZONE: Failed to write boundary count:`, e.message);
                     }
                 }
 
