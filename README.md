@@ -126,6 +126,7 @@ The 4 antenna patches (gold squares) must be positioned at the **top** of the en
 - **Zone Types**: Detection (inclusion), Filter (exclusion), and Interference (false positive filtering)
 - **Room Boundary**: Ignore targets outside your room's outline (up to 8 corners), without using a zone
 - **Zigbee Router Mode**: Stable connection that also extends your Zigbee mesh
+- **Wireless Updates (OTA)**: Update the firmware from the Zigbee2MQTT OTA tab, no USB needed (v1.2.0+, see [OTA Updates](#ota-updates-via-zigbee2mqtt))
 - **Persistent Configuration**: Zone settings saved to flash memory
 
 ---
@@ -199,15 +200,43 @@ From firmware **v1.2.0**, the sensor can be updated over Zigbee from the Zigbee2
 
 ### One-time setup
 
-1. **Flash v1.2.0 over USB** using [Firmware Flashing](#firmware-flashing). Older firmware has no room for a second app slot, so this one flash must be done by cable. Every later update can go over the air.
-   > **Note:** Flashing a merged `.bin` resets the settings stored on the device (sensitivities, cooldowns, zones and room boundary) to their defaults. Zigbee pairing data is stored in a separate area that isn't touched, so the sensor normally stays paired. If it doesn't reappear in Z2M, pair it again.
-2. **Update the converter** to the v1.2.0 version (`shs01_enhanced.mjs` or `.js`) and restart Zigbee2MQTT.
+1. **Flash the latest firmware over USB** (v1.2.0 or newer) using [Firmware Flashing](#firmware-flashing). Older firmware has no room for a second app slot, so this one flash must be done by cable. Every later update can go over the air.
+   > **Note:** Flashing a merged `.bin` resets the settings stored on the device (sensitivities, cooldowns, zones and room boundary) to their defaults. Zigbee pairing data is stored in a separate area that isn't touched, so the sensor normally stays paired. If it doesn't reappear in Z2M, pair it again. Afterwards, send your zones again with **Save to Sensor** in the Zone Configurator add-on.
+2. **Update the converter** to the latest `shs01_enhanced.mjs` (or `.js` for Zigbee2MQTT 1.x) from the [Releases page](https://github.com/notownblues/SHS-Z2M-Presence/releases) and restart Zigbee2MQTT.
 3. **Re-interview the device:** in Z2M open the device, go to **About**, and click **Interview**. Z2M learns about the OTA cluster during the interview.
-4. **Add the OTA index** to Z2M's `configuration.yaml`, then restart Zigbee2MQTT:
-   ```yaml
-   ota:
-     zigbee_ota_override_index_location: https://raw.githubusercontent.com/notownblues/SHS-Z2M-Presence/main/ota/index.json
-   ```
+4. **Add the OTA index to `configuration.yaml`** (see below), then restart Zigbee2MQTT.
+
+### Adding the OTA index to configuration.yaml
+
+Zigbee2MQTT only knows about SHS01 updates once you point it at this repository's OTA index. Open Zigbee2MQTT's own `configuration.yaml`:
+
+- **Home Assistant add-on:** `/homeassistant/zigbee2mqtt/configuration.yaml` (edit it with the File editor or Studio Code Server add-on)
+- **Docker / standalone:** `data/configuration.yaml` in your Zigbee2MQTT folder
+
+Add an `ota:` section at the **top level** of the file. The end of the file is a good place, for example just before the `version:` line:
+
+```yaml
+blocklist: []
+ota:
+  zigbee_ota_override_index_location:
+    https://raw.githubusercontent.com/notownblues/SHS-Z2M-Presence/main/ota/index.json
+version: 5
+```
+
+The indentation matters. A mistake stops Zigbee2MQTT from starting.
+
+| Line | Indentation |
+|------|-------------|
+| `ota:` | none: it starts at the left edge, like `mqtt:` or `serial:` |
+| `zigbee_ota_override_index_location:` | 2 spaces |
+| `https://raw.githubusercontent.com/...index.json` | 4 spaces, on its own line |
+
+Rules to follow:
+- Use spaces only, never tabs.
+- If your file already has an `ota:` section, don't add a second one. Put the `zigbee_ota_override_index_location:` line and the URL line inside the existing section.
+- The Home Assistant File editor shows a **green tick** at the top right when the file is valid and a **red icon** when it isn't. Don't restart Zigbee2MQTT while it shows the red icon.
+
+Save the file and restart Zigbee2MQTT.
 
 ### Updating
 
@@ -221,6 +250,15 @@ If the download is interrupted or aborted, the sensor keeps running its current 
 ### Safety: automatic rollback
 
 After an OTA update, the new firmware must reconnect to your Zigbee network within 10 minutes. If it crashes or can't rejoin, the sensor automatically switches back to the previous firmware.
+
+### Troubleshooting
+
+| Problem | What to check |
+|---------|---------------|
+| Zigbee2MQTT doesn't start after editing `configuration.yaml` | The YAML is probably invalid. Check the indentation of the `ota:` lines (see above), and that there's only one `ota:` section. The add-on **Log** tab names the line that's wrong. |
+| The sensor isn't listed in the OTA tab | The device runs firmware older than v1.2.0 (check **About** → *Firmware version*), or it hasn't been re-interviewed since flashing. Flash over USB or click **Interview**. |
+| "No update available" | The sensor already runs the latest release. |
+| Zigbee2MQTT hangs after `Serialport opened` and keeps restarting | The Zigbee coordinator stick isn't responding; this is unrelated to OTA. Stop Zigbee2MQTT, unplug the stick for 30 seconds, plug it back in and start Zigbee2MQTT again. |
 
 ---
 
