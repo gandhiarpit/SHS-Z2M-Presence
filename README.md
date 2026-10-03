@@ -223,19 +223,6 @@ ota:
 version: 5
 ```
 
-The indentation matters. A mistake stops Zigbee2MQTT from starting.
-
-| Line | Indentation |
-|------|-------------|
-| `ota:` | none: it starts at the left edge, like `mqtt:` or `serial:` |
-| `zigbee_ota_override_index_location:` | 2 spaces |
-| `https://raw.githubusercontent.com/...index.json` | 4 spaces, on its own line |
-
-Rules to follow:
-- Use spaces only, never tabs.
-- If your file already has an `ota:` section, don't add a second one. Put the `zigbee_ota_override_index_location:` line and the URL line inside the existing section.
-- The Home Assistant File editor shows a **green tick** at the top right when the file is valid and a **red icon** when it isn't. Don't restart Zigbee2MQTT while it shows the red icon.
-
 Save the file and restart Zigbee2MQTT.
 
 ### Updating
@@ -244,21 +231,6 @@ Save the file and restart Zigbee2MQTT.
 2. If a newer version is listed, click **Update firmware**.
 3. Leave the sensor powered. With Z2M's default OTA settings, a full image (~700 KB) takes **about an hour**. The sensor keeps detecting and reporting during the download.
 4. When the download finishes, the sensor restarts into the new firmware and reconnects.
-
-If the download is interrupted or aborted, the sensor keeps running its current firmware. Start the update again.
-
-### Safety: automatic rollback
-
-After an OTA update, the new firmware must reconnect to your Zigbee network within 10 minutes. If it crashes or can't rejoin, the sensor automatically switches back to the previous firmware.
-
-### Troubleshooting
-
-| Problem | What to check |
-|---------|---------------|
-| Zigbee2MQTT doesn't start after editing `configuration.yaml` | The YAML is probably invalid. Check the indentation of the `ota:` lines (see above), and that there's only one `ota:` section. The add-on **Log** tab names the line that's wrong. |
-| The sensor isn't listed in the OTA tab | The device runs firmware older than v1.2.0 (check **About** → *Firmware version*), or it hasn't been re-interviewed since flashing. Flash over USB or click **Interview**. |
-| "No update available" | The sensor already runs the latest release. |
-| Zigbee2MQTT hangs after `Serialport opened` and keeps restarting | The Zigbee coordinator stick isn't responding; this is unrelated to OTA. Stop Zigbee2MQTT, unplug the stick for 30 seconds, plug it back in and start Zigbee2MQTT again. |
 
 ---
 
