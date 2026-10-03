@@ -70,8 +70,8 @@
 #define SHS_MODEL_IDENTIFIER            "\x10SHS-Z2M-Presence"
 
 /* Optional Basic metadata */
-#define SHS_BASIC_DATE_CODE             "2025-12-12"
-#define SHS_BASIC_SW_BUILD_ID           "v1.0.4"
+#define SHS_BASIC_DATE_CODE             "2026-10-03"
+#define SHS_BASIC_SW_BUILD_ID           "v1.0.5"
 
 /* ============================================================================
  * CLUSTER IDS

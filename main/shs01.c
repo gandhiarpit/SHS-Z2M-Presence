@@ -2319,6 +2319,48 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct) {
  * ZIGBEE TASK - ENDPOINT & CLUSTER CREATION
  * ============================================================================ */
 
+/*
+ * Descriptive attributes for genAnalogInput / genBinaryInput.
+ *
+ * Z2M resolves device definitions before external converters are loaded, so at
+ * every startup it auto-generates a definition for this device first. That
+ * generator reads description/applicationType/engineeringUnits/min/max/resolution
+ * from every analog/binary input endpoint unless they are already in its
+ * attribute cache. If they are unsupported, nothing is cached and ~100 reads are
+ * sent on every Z2M start; with the device offline each one waits for
+ * NWK_NO_ROUTE and Z2M startup stalls (GitHub issue #12). Exposing them lets Z2M
+ * cache the values once, so later starts send no reads.
+ */
+#define SHS_AI_APP_TYPE_COUNT       0x000C0000UL  /* Group 0 (AI), type 0x0C = count/unitless */
+#define SHS_BACNET_UNITS_NO_UNITS   95
+
+/* ZCL char strings (length-prefixed), one per endpoint, kept for the lifetime of the stack */
+static char s_zcl_desc[SHS_EP_ZONE5_TARGETS + 1][33];
+
+static char *shs_zcl_desc(uint8_t endpoint, const char *text) {
+    size_t len = strnlen(text, sizeof(s_zcl_desc[0]) - 1);
+    s_zcl_desc[endpoint][0] = (char)len;
+    memcpy(&s_zcl_desc[endpoint][1], text, len);
+    return s_zcl_desc[endpoint];
+}
+
+static void shs_add_analog_input_meta(esp_zb_attribute_list_t *ai, uint8_t endpoint, const char *desc,
+                                      float min_value, float max_value, float resolution) {
+    uint32_t app_type = SHS_AI_APP_TYPE_COUNT;
+    uint16_t units = SHS_BACNET_UNITS_NO_UNITS;
+
+    esp_zb_analog_input_cluster_add_attr(ai, ESP_ZB_ZCL_ATTR_ANALOG_INPUT_DESCRIPTION_ID, shs_zcl_desc(endpoint, desc));
+    esp_zb_analog_input_cluster_add_attr(ai, ESP_ZB_ZCL_ATTR_ANALOG_INPUT_APPLICATION_TYPE_ID, &app_type);
+    esp_zb_analog_input_cluster_add_attr(ai, ESP_ZB_ZCL_ATTR_ANALOG_INPUT_ENGINEERING_UNITS_ID, &units);
+    esp_zb_analog_input_cluster_add_attr(ai, ESP_ZB_ZCL_ATTR_ANALOG_INPUT_MIN_PRESENT_VALUE_ID, &min_value);
+    esp_zb_analog_input_cluster_add_attr(ai, ESP_ZB_ZCL_ATTR_ANALOG_INPUT_MAX_PRESENT_VALUE_ID, &max_value);
+    esp_zb_analog_input_cluster_add_attr(ai, ESP_ZB_ZCL_ATTR_ANALOG_INPUT_RESOLUTION_ID, &resolution);
+}
+
+static void shs_add_binary_input_meta(esp_zb_attribute_list_t *bi, uint8_t endpoint, const char *desc) {
+    esp_zb_binary_input_cluster_add_attr(bi, ESP_ZB_ZCL_ATTR_BINARY_INPUT_DESCRIPTION_ID, shs_zcl_desc(endpoint, desc));
+}
+
 static void shs_zigbee_task(void *pvParameters) {
     esp_zb_cfg_t zb_nwk_cfg = SHS_ZR_CONFIG();
     esp_zb_init(&zb_nwk_cfg);
@@ -2527,6 +2569,7 @@ static void shs_zigbee_task(void *pvParameters) {
             .status_flags = 0,
         };
         esp_zb_attribute_list_t *analog_input = esp_zb_analog_input_cluster_create(&analog_cfg);
+        shs_add_analog_input_meta(analog_input, SHS_EP_LD2450_TARGET_COUNT, "Target count", 0.0f, 3.0f, 1.0f);
         esp_zb_cluster_list_add_analog_input_cluster(cl, analog_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
         esp_zb_endpoint_config_t ep_cfg = {
@@ -2554,6 +2597,7 @@ static void shs_zigbee_task(void *pvParameters) {
             .status_flags = 0,
         };
         esp_zb_attribute_list_t *binary_input = esp_zb_binary_input_cluster_create(&binary_cfg);
+        shs_add_binary_input_meta(binary_input, SHS_EP_LD2450_ZONE1, "Zone 1 occupancy");
         esp_zb_cluster_list_add_binary_input_cluster(cl, binary_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
         esp_zb_endpoint_config_t ep_cfg = {
@@ -2581,6 +2625,7 @@ static void shs_zigbee_task(void *pvParameters) {
             .status_flags = 0,
         };
         esp_zb_attribute_list_t *binary_input = esp_zb_binary_input_cluster_create(&binary_cfg);
+        shs_add_binary_input_meta(binary_input, SHS_EP_LD2450_ZONE2, "Zone 2 occupancy");
         esp_zb_cluster_list_add_binary_input_cluster(cl, binary_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
         esp_zb_endpoint_config_t ep_cfg = {
@@ -2608,6 +2653,7 @@ static void shs_zigbee_task(void *pvParameters) {
             .status_flags = 0,
         };
         esp_zb_attribute_list_t *binary_input = esp_zb_binary_input_cluster_create(&binary_cfg);
+        shs_add_binary_input_meta(binary_input, SHS_EP_LD2450_ZONE3, "Zone 3 occupancy");
         esp_zb_cluster_list_add_binary_input_cluster(cl, binary_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
         esp_zb_endpoint_config_t ep_cfg = {
@@ -2635,6 +2681,7 @@ static void shs_zigbee_task(void *pvParameters) {
             .status_flags = 0,
         };
         esp_zb_attribute_list_t *binary_input = esp_zb_binary_input_cluster_create(&binary_cfg);
+        shs_add_binary_input_meta(binary_input, SHS_EP_LD2450_ZONE4, "Zone 4 occupancy");
         esp_zb_cluster_list_add_binary_input_cluster(cl, binary_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
         esp_zb_endpoint_config_t ep_cfg = {
@@ -2662,6 +2709,7 @@ static void shs_zigbee_task(void *pvParameters) {
             .status_flags = 0,
         };
         esp_zb_attribute_list_t *binary_input = esp_zb_binary_input_cluster_create(&binary_cfg);
+        shs_add_binary_input_meta(binary_input, SHS_EP_LD2450_ZONE5, "Zone 5 occupancy");
         esp_zb_cluster_list_add_binary_input_cluster(cl, binary_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
         esp_zb_endpoint_config_t ep_cfg = {
@@ -2676,6 +2724,9 @@ static void shs_zigbee_task(void *pvParameters) {
 
     /* ========== EP8-16: LD2450 Position Data (genAnalogInput) - Only Active When Position Reporting Enabled ========== */
     /* Target 1: X, Y, Distance */
+    static const char *const shs_desc_x[3] = {"Target 1 X", "Target 2 X", "Target 3 X"};
+    static const char *const shs_desc_y[3] = {"Target 1 Y", "Target 2 Y", "Target 3 Y"};
+    static const char *const shs_desc_dist[3] = {"Target 1 distance", "Target 2 distance", "Target 3 distance"};
     for (int i = 0; i < 3; i++) {
         uint8_t ep_base = SHS_EP_LD2450_T1_X + (i * 3);  /* EP8, EP11, EP14 */
 
@@ -2691,6 +2742,7 @@ static void shs_zigbee_task(void *pvParameters) {
                 .status_flags = 0,
             };
             esp_zb_attribute_list_t *analog_input = esp_zb_analog_input_cluster_create(&analog_cfg);
+            shs_add_analog_input_meta(analog_input, ep_base, shs_desc_x[i], 0.0f, 6000.0f, 1.0f);
             esp_zb_cluster_list_add_analog_input_cluster(cl, analog_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
             esp_zb_endpoint_config_t ep_cfg = {
@@ -2715,6 +2767,7 @@ static void shs_zigbee_task(void *pvParameters) {
                 .status_flags = 0,
             };
             esp_zb_attribute_list_t *analog_input = esp_zb_analog_input_cluster_create(&analog_cfg);
+            shs_add_analog_input_meta(analog_input, ep_base + 1, shs_desc_y[i], 0.0f, 6000.0f, 1.0f);
             esp_zb_cluster_list_add_analog_input_cluster(cl, analog_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
             esp_zb_endpoint_config_t ep_cfg = {
@@ -2739,6 +2792,7 @@ static void shs_zigbee_task(void *pvParameters) {
                 .status_flags = 0,
             };
             esp_zb_attribute_list_t *analog_input = esp_zb_analog_input_cluster_create(&analog_cfg);
+            shs_add_analog_input_meta(analog_input, ep_base + 2, shs_desc_dist[i], 0.0f, 6000.0f, 1.0f);
             esp_zb_cluster_list_add_analog_input_cluster(cl, analog_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
             esp_zb_endpoint_config_t ep_cfg = {
@@ -2767,6 +2821,7 @@ static void shs_zigbee_task(void *pvParameters) {
             .status_flags = 0,
         };
         esp_zb_attribute_list_t *binary_input = esp_zb_binary_input_cluster_create(&binary_cfg);
+        shs_add_binary_input_meta(binary_input, SHS_EP_LD2410C_MOVING, "Moving target");
         esp_zb_cluster_list_add_binary_input_cluster(cl, binary_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
         esp_zb_endpoint_config_t ep_cfg = {
@@ -2794,6 +2849,7 @@ static void shs_zigbee_task(void *pvParameters) {
             .status_flags = 0,
         };
         esp_zb_attribute_list_t *binary_input = esp_zb_binary_input_cluster_create(&binary_cfg);
+        shs_add_binary_input_meta(binary_input, SHS_EP_LD2410C_STATIC, "Static target");
         esp_zb_cluster_list_add_binary_input_cluster(cl, binary_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
         esp_zb_endpoint_config_t ep_cfg = {
@@ -2821,6 +2877,7 @@ static void shs_zigbee_task(void *pvParameters) {
             .status_flags = 0,
         };
         esp_zb_attribute_list_t *analog_input = esp_zb_analog_input_cluster_create(&analog_cfg);
+        shs_add_analog_input_meta(analog_input, SHS_EP_ZONE1_TARGETS, "Zone 1 targets", 0.0f, 3.0f, 1.0f);
         esp_zb_cluster_list_add_analog_input_cluster(cl, analog_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
         esp_zb_endpoint_config_t ep_cfg = {
@@ -2848,6 +2905,7 @@ static void shs_zigbee_task(void *pvParameters) {
             .status_flags = 0,
         };
         esp_zb_attribute_list_t *analog_input = esp_zb_analog_input_cluster_create(&analog_cfg);
+        shs_add_analog_input_meta(analog_input, SHS_EP_ZONE2_TARGETS, "Zone 2 targets", 0.0f, 3.0f, 1.0f);
         esp_zb_cluster_list_add_analog_input_cluster(cl, analog_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
         esp_zb_endpoint_config_t ep_cfg = {
@@ -2875,6 +2933,7 @@ static void shs_zigbee_task(void *pvParameters) {
             .status_flags = 0,
         };
         esp_zb_attribute_list_t *analog_input = esp_zb_analog_input_cluster_create(&analog_cfg);
+        shs_add_analog_input_meta(analog_input, SHS_EP_ZONE3_TARGETS, "Zone 3 targets", 0.0f, 3.0f, 1.0f);
         esp_zb_cluster_list_add_analog_input_cluster(cl, analog_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
         esp_zb_endpoint_config_t ep_cfg = {
@@ -2902,6 +2961,7 @@ static void shs_zigbee_task(void *pvParameters) {
             .status_flags = 0,
         };
         esp_zb_attribute_list_t *analog_input = esp_zb_analog_input_cluster_create(&analog_cfg);
+        shs_add_analog_input_meta(analog_input, SHS_EP_ZONE4_TARGETS, "Zone 4 targets", 0.0f, 3.0f, 1.0f);
         esp_zb_cluster_list_add_analog_input_cluster(cl, analog_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
         esp_zb_endpoint_config_t ep_cfg = {
@@ -2929,6 +2989,7 @@ static void shs_zigbee_task(void *pvParameters) {
             .status_flags = 0,
         };
         esp_zb_attribute_list_t *analog_input = esp_zb_analog_input_cluster_create(&analog_cfg);
+        shs_add_analog_input_meta(analog_input, SHS_EP_ZONE5_TARGETS, "Zone 5 targets", 0.0f, 3.0f, 1.0f);
         esp_zb_cluster_list_add_analog_input_cluster(cl, analog_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
         esp_zb_endpoint_config_t ep_cfg = {
