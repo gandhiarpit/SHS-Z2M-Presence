@@ -121,6 +121,7 @@ The 4 antenna patches (gold squares) must be positioned at the **top** of the en
 
 - **Dual Sensor Cross-Validation**: LD2410C and LD2450 work together to reduce false positives
 - **Multi-Zone Support**: Up to 5 configurable zones with different operation modes
+- **Zone Shapes**: Each zone is a rectangle or a polygon of up to 8 corners, so zones can follow the walls on a corner mount
 - **Multi-Target Tracking**: Track up to 3 simultaneous targets with X/Y positions
 - **Zone Types**: Detection (inclusion), Filter (exclusion), and Interference (false positive filtering)
 - **Room Boundary**: Ignore targets outside your room's outline (up to 8 corners), without using a zone
@@ -318,6 +319,12 @@ The global **Zone Mode** (Off / Include / Exclude) decides how Detection zones a
 - **Exclude**: only targets outside all Detection zones count.
 
 Interference zones are always ignored, whatever the mode. If no Detection zones are enabled, every target outside Interference zones counts.
+
+## Zone Shapes
+
+Zones are rectangles along the sensor's own axes. Since firmware v1.3.0 each zone can instead be a polygon of up to 8 corners. That matters for a corner mount: the sensor's axes are then at 45° to the walls, so a zone that is square to the room (over a dining table, say) is a tilted shape for the sensor. The [Zone Configurator add-on](https://github.com/notownblues/SHS-Z2M-Presence-Zones) (v2.10.0+) sends polygons automatically. Polygon zones work with every zone type and Zone Mode, and are stored in flash.
+
+Zigbee attributes (Config cluster `0xFDCD`, endpoint 1): zone N (1-5) uses the block starting at `0x0100 + (N-1) * 0x20`. `+0` is the point count (uint8, below 3 = use the rectangle) and `+1`..`+16` the x/y of up to 8 points (int16, mm, sensor coordinates), so zone 1 is `0x0100`-`0x0110` and zone 5 is `0x0180`-`0x0190`. The converter accepts them as `zone_config.zoneN_polygon: [{x, y}, ...]`; an empty array switches the zone back to its rectangle. Keep sending `zoneN_x1`..`zoneN_y2` as well: older firmware ignores the polygon and uses the rectangle.
 
 ## Room Boundary
 

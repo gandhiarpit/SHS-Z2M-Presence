@@ -46,6 +46,9 @@ extern "C" {
 /* Room boundary: polygon (sensor coordinates) outside which targets are ignored */
 #define LD2450_MAX_BOUNDARY_POINTS  8
 
+/* Zone polygon: optional shape (sensor coordinates) used instead of the zone rectangle */
+#define LD2450_MAX_ZONE_POINTS      8
+
 /* Coordinate system limits (millimeters) */
 #define LD2450_X_MIN                -3000
 #define LD2450_X_MAX                3000
@@ -106,7 +109,7 @@ typedef struct {
 } ld2450_target_t;
 
 /**
- * @brief Rectangular zone definition
+ * @brief Zone definition: a rectangle, or a polygon when poly_count >= 3
  */
 typedef struct {
     int16_t x1;             // Near-left X coordinate (mm)
@@ -116,6 +119,8 @@ typedef struct {
     bool occupied;          // Whether zone currently has target(s)
     bool enabled;           // Whether zone is defined/enabled
     uint8_t target_count;   // Number of targets currently in this zone (0-3)
+    uint8_t poly_count;     // Polygon vertex count; fewer than 3 = use the rectangle
+    int16_t poly_xy[LD2450_MAX_ZONE_POINTS * 2];  // Polygon vertices: x0, y0, x1, y1, ... (mm)
 } ld2450_zone_t;
 
 /**
@@ -253,6 +258,19 @@ esp_err_t ld2450_set_zone(
 esp_err_t ld2450_clear_zone(uint8_t zone_num);
 
 /**
+ * @brief Set the polygon shape of a zone (sensor coordinates, mm)
+ *
+ * When set, the polygon is used instead of the zone rectangle. Vertices may lie
+ * outside the sensor range; that part of the zone never sees targets.
+ *
+ * @param zone_num Zone number (0 to LD2450_MAX_ZONES-1)
+ * @param xy    Interleaved vertex coordinates: x0, y0, x1, y1, ... (count * 2 values)
+ * @param count Number of vertices (max LD2450_MAX_ZONE_POINTS); fewer than 3 clears the polygon
+ * @return ESP_OK on success
+ */
+esp_err_t ld2450_set_zone_polygon(uint8_t zone_num, const int16_t *xy, uint8_t count);
+
+/**
  * @brief Set zone operation type
  * @param type Zone type (disabled/detection/filter)
  * @return ESP_OK on success
@@ -343,13 +361,20 @@ static inline uint16_t ld2450_calc_distance(int16_t x, int16_t y) {
 uint16_t ld2450_calc_angle(int16_t x, int16_t y);
 
 /**
- * @brief Check if point is inside zone
+ * @brief Check if point is inside zone (polygon if set, otherwise rectangle)
  * @param x X coordinate (mm)
  * @param y Y coordinate (mm)
  * @param zone Zone definition
  * @return true if point is inside zone
  */
 bool ld2450_point_in_zone(int16_t x, int16_t y, const ld2450_zone_t *zone);
+
+/**
+ * @brief Check if point is inside a polygon (ray casting, integer math)
+ * @param xy    Interleaved vertex coordinates: x0, y0, x1, y1, ...
+ * @param count Number of vertices; fewer than 3 never contains the point
+ */
+bool ld2450_point_in_polygon(int16_t x, int16_t y, const int16_t *xy, uint8_t count);
 
 /**
  * @brief Set the room boundary polygon (sensor coordinates, mm)

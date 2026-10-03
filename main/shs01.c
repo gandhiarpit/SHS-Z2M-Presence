@@ -94,6 +94,9 @@ static SemaphoreHandle_t target_data_mutex = NULL;
 #define SHS_NVS_KEY_Z5_TYPE     "z5_type"
 #define SHS_NVS_KEY_BND_COUNT   "bnd_n"
 #define SHS_NVS_KEY_BND_XY      "bnd_xy"
+/* Zone polygons: "z<N>_pn" (u8 point count) and "z<N>_pxy" (blob), N = 1-5 */
+#define SHS_NVS_KEY_ZPOLY_N_FMT   "z%d_pn"
+#define SHS_NVS_KEY_ZPOLY_XY_FMT  "z%d_pxy"
 
 /* ============================================================================
  * CONFIGURATION STORAGE
@@ -242,6 +245,15 @@ static uint8_t shs_boundary_count = 0;
 static int16_t shs_boundary_xy[LD2450_MAX_BOUNDARY_POINTS * 2] = {0};
 _Static_assert(SHS_ATTR_BOUNDARY_LAST_CFG - SHS_ATTR_BOUNDARY_FIRST_CFG + 1 == LD2450_MAX_BOUNDARY_POINTS * 2,
                "Boundary attribute range must match the boundary coordinate array");
+
+/* Zone polygons (sensor coordinates, mm). Fewer than 3 points = use the zone rectangle. */
+static uint8_t shs_zone_poly_n[LD2450_MAX_ZONES] = {0};
+static int16_t shs_zone_poly_xy[LD2450_MAX_ZONES][LD2450_MAX_ZONE_POINTS * 2] = {{0}};
+_Static_assert(SHS_ATTR_ZONE_POLY_STRIDE >= 1 + LD2450_MAX_ZONE_POINTS * 2,
+               "Zone polygon attribute block must hold the count and all coordinates");
+_Static_assert(SHS_ATTR_ZONE_POLY_LAST_CFG ==
+               SHS_ATTR_ZONE_POLY_BASE_CFG + (LD2450_MAX_ZONES - 1) * SHS_ATTR_ZONE_POLY_STRIDE + LD2450_MAX_ZONE_POINTS * 2,
+               "Zone polygon attribute range must match the zone polygon arrays");
 
 /* Zone config debounce - wait for all attributes to arrive before applying */
 #define SHS_ZONE_CFG_DEBOUNCE_MS  500  /* Wait 500ms after last attribute before applying */
@@ -416,6 +428,14 @@ static void shs_zone_cfg_save_to_nvs(void) {
     /* Room boundary */
     nvs_set_u8(h, SHS_NVS_KEY_BND_COUNT, shs_boundary_count);
     nvs_set_blob(h, SHS_NVS_KEY_BND_XY, shs_boundary_xy, sizeof(shs_boundary_xy));
+    /* Zone polygons */
+    for (int z = 0; z < LD2450_MAX_ZONES; z++) {
+        char key[16];
+        snprintf(key, sizeof(key), SHS_NVS_KEY_ZPOLY_N_FMT, z + 1);
+        nvs_set_u8(h, key, shs_zone_poly_n[z]);
+        snprintf(key, sizeof(key), SHS_NVS_KEY_ZPOLY_XY_FMT, z + 1);
+        nvs_set_blob(h, key, shs_zone_poly_xy[z], sizeof(shs_zone_poly_xy[z]));
+    }
 
     nvs_commit(h);
     nvs_close(h);
@@ -516,6 +536,21 @@ static void shs_zone_cfg_load_from_nvs(void) {
         shs_boundary_count = 0;
     }
 
+    /* Zone polygons (missing or wrong size = no polygon, use the rectangle) */
+    for (int z = 0; z < LD2450_MAX_ZONES; z++) {
+        char key_n[16], key_xy[16];
+        snprintf(key_n, sizeof(key_n), SHS_NVS_KEY_ZPOLY_N_FMT, z + 1);
+        snprintf(key_xy, sizeof(key_xy), SHS_NVS_KEY_ZPOLY_XY_FMT, z + 1);
+        size_t poly_len = sizeof(shs_zone_poly_xy[z]);
+        if (nvs_get_u8(h, key_n, &u8tmp) == ESP_OK &&
+            nvs_get_blob(h, key_xy, shs_zone_poly_xy[z], &poly_len) == ESP_OK &&
+            poly_len == sizeof(shs_zone_poly_xy[z])) {
+            shs_zone_poly_n[z] = (u8tmp > LD2450_MAX_ZONE_POINTS) ? LD2450_MAX_ZONE_POINTS : u8tmp;
+        } else {
+            shs_zone_poly_n[z] = 0;
+        }
+    }
+
     nvs_close(h);
 
     ESP_LOGI(SHS_TAG, "Zone config loaded: type=%d, z1=%d, z2=%d, z3=%d, z4=%d, z5=%d, boundary=%d pts",
@@ -600,6 +635,15 @@ static void shs_zone_cfg_apply_to_sensor(void) {
                  shs_zone5_x1, shs_zone5_y1, shs_zone5_x2, shs_zone5_y2, shs_zone5_type);
     } else {
         ld2450_clear_zone(4);
+    }
+
+    /* Zone polygons (used instead of the rectangle when set) */
+    for (int z = 0; z < LD2450_MAX_ZONES; z++) {
+        ld2450_set_zone_polygon(z, shs_zone_poly_xy[z], shs_zone_poly_n[z]);
+        for (int i = 0; i < shs_zone_poly_n[z] && i < LD2450_MAX_ZONE_POINTS; i++) {
+            ESP_LOGI(SHS_TAG, "Zone %d polygon point %d: (%d,%d)", z + 1, i,
+                     shs_zone_poly_xy[z][i * 2], shs_zone_poly_xy[z][i * 2 + 1]);
+        }
     }
 
     /* Room boundary (targets outside it are ignored for occupancy) */
@@ -929,44 +973,45 @@ static bool is_valid_target(const ld2450_target_t *target) {
     return true;
 }
 
-/* Check if a point is within a rectangular zone */
-static bool shs_point_in_zone(int16_t x, int16_t y, int16_t x1, int16_t y1, int16_t x2, int16_t y2) {
-    int16_t min_x = (x1 < x2) ? x1 : x2;
-    int16_t max_x = (x1 > x2) ? x1 : x2;
-    int16_t min_y = (y1 < y2) ? y1 : y2;
-    int16_t max_y = (y1 > y2) ? y1 : y2;
+/* Zone settings needed for target checks, in zone order */
+typedef struct {
+    bool enabled;
+    uint8_t type;
+    int16_t x1, y1, x2, y2;
+    uint8_t poly_n;
+    const int16_t *poly_xy;
+} shs_zone_view_t;
+
+static void shs_get_zone_views(shs_zone_view_t views[LD2450_MAX_ZONES]) {
+    const shs_zone_view_t zones[LD2450_MAX_ZONES] = {
+        {shs_zone1_enabled, shs_zone1_type, shs_zone1_x1, shs_zone1_y1, shs_zone1_x2, shs_zone1_y2, shs_zone_poly_n[0], shs_zone_poly_xy[0]},
+        {shs_zone2_enabled, shs_zone2_type, shs_zone2_x1, shs_zone2_y1, shs_zone2_x2, shs_zone2_y2, shs_zone_poly_n[1], shs_zone_poly_xy[1]},
+        {shs_zone3_enabled, shs_zone3_type, shs_zone3_x1, shs_zone3_y1, shs_zone3_x2, shs_zone3_y2, shs_zone_poly_n[2], shs_zone_poly_xy[2]},
+        {shs_zone4_enabled, shs_zone4_type, shs_zone4_x1, shs_zone4_y1, shs_zone4_x2, shs_zone4_y2, shs_zone_poly_n[3], shs_zone_poly_xy[3]},
+        {shs_zone5_enabled, shs_zone5_type, shs_zone5_x1, shs_zone5_y1, shs_zone5_x2, shs_zone5_y2, shs_zone_poly_n[4], shs_zone_poly_xy[4]},
+    };
+    memcpy(views, zones, sizeof(zones));
+}
+
+/* Check if a point is within a zone: its polygon if set, otherwise its rectangle */
+static bool shs_point_in_zone(int16_t x, int16_t y, const shs_zone_view_t *zone) {
+    if (zone->poly_n >= 3) {
+        return ld2450_point_in_polygon(x, y, zone->poly_xy, zone->poly_n);
+    }
+    int16_t min_x = (zone->x1 < zone->x2) ? zone->x1 : zone->x2;
+    int16_t max_x = (zone->x1 > zone->x2) ? zone->x1 : zone->x2;
+    int16_t min_y = (zone->y1 < zone->y2) ? zone->y1 : zone->y2;
+    int16_t max_y = (zone->y1 > zone->y2) ? zone->y1 : zone->y2;
     return (x >= min_x && x <= max_x && y >= min_y && y <= max_y);
 }
 
 /* Check if a target is in any enabled interference zone */
 static bool shs_target_in_interference_zone(int16_t x, int16_t y) {
-    /* Check zone 1 */
-    if (shs_zone1_enabled && shs_zone1_type == LD2450_ZONE_INTERFERENCE) {
-        if (shs_point_in_zone(x, y, shs_zone1_x1, shs_zone1_y1, shs_zone1_x2, shs_zone1_y2)) {
-            return true;
-        }
-    }
-    /* Check zone 2 */
-    if (shs_zone2_enabled && shs_zone2_type == LD2450_ZONE_INTERFERENCE) {
-        if (shs_point_in_zone(x, y, shs_zone2_x1, shs_zone2_y1, shs_zone2_x2, shs_zone2_y2)) {
-            return true;
-        }
-    }
-    /* Check zone 3 */
-    if (shs_zone3_enabled && shs_zone3_type == LD2450_ZONE_INTERFERENCE) {
-        if (shs_point_in_zone(x, y, shs_zone3_x1, shs_zone3_y1, shs_zone3_x2, shs_zone3_y2)) {
-            return true;
-        }
-    }
-    /* Check zone 4 */
-    if (shs_zone4_enabled && shs_zone4_type == LD2450_ZONE_INTERFERENCE) {
-        if (shs_point_in_zone(x, y, shs_zone4_x1, shs_zone4_y1, shs_zone4_x2, shs_zone4_y2)) {
-            return true;
-        }
-    }
-    /* Check zone 5 */
-    if (shs_zone5_enabled && shs_zone5_type == LD2450_ZONE_INTERFERENCE) {
-        if (shs_point_in_zone(x, y, shs_zone5_x1, shs_zone5_y1, shs_zone5_x2, shs_zone5_y2)) {
+    shs_zone_view_t zones[LD2450_MAX_ZONES];
+    shs_get_zone_views(zones);
+    for (size_t i = 0; i < LD2450_MAX_ZONES; i++) {
+        if (zones[i].enabled && zones[i].type == LD2450_ZONE_INTERFERENCE &&
+            shs_point_in_zone(x, y, &zones[i])) {
             return true;
         }
     }
@@ -976,19 +1021,14 @@ static bool shs_target_in_interference_zone(int16_t x, int16_t y) {
 /* Check if a target is in any enabled non-interference zone. These zones take part in
  * the global zone mode (Include/Exclude). any_zone reports whether any such zone exists. */
 static bool shs_target_in_mode_zone(int16_t x, int16_t y, bool *any_zone) {
-    const struct { bool enabled; uint8_t type; int16_t x1, y1, x2, y2; } zones[] = {
-        {shs_zone1_enabled, shs_zone1_type, shs_zone1_x1, shs_zone1_y1, shs_zone1_x2, shs_zone1_y2},
-        {shs_zone2_enabled, shs_zone2_type, shs_zone2_x1, shs_zone2_y1, shs_zone2_x2, shs_zone2_y2},
-        {shs_zone3_enabled, shs_zone3_type, shs_zone3_x1, shs_zone3_y1, shs_zone3_x2, shs_zone3_y2},
-        {shs_zone4_enabled, shs_zone4_type, shs_zone4_x1, shs_zone4_y1, shs_zone4_x2, shs_zone4_y2},
-        {shs_zone5_enabled, shs_zone5_type, shs_zone5_x1, shs_zone5_y1, shs_zone5_x2, shs_zone5_y2},
-    };
+    shs_zone_view_t zones[LD2450_MAX_ZONES];
+    shs_get_zone_views(zones);
     bool inside = false;
     *any_zone = false;
-    for (size_t i = 0; i < sizeof(zones) / sizeof(zones[0]); i++) {
+    for (size_t i = 0; i < LD2450_MAX_ZONES; i++) {
         if (!zones[i].enabled || zones[i].type == LD2450_ZONE_INTERFERENCE) continue;
         *any_zone = true;
-        if (shs_point_in_zone(x, y, zones[i].x1, zones[i].y1, zones[i].x2, zones[i].y2)) {
+        if (shs_point_in_zone(x, y, &zones[i])) {
             inside = true;
         }
     }
@@ -1915,6 +1955,26 @@ static esp_err_t shs_zb_attribute_handler(const esp_zb_zcl_set_attr_value_messag
                     shs_zone_cfg_schedule_apply();
                     return ESP_OK;
                 }
+                /* Zone polygons: per-zone block of point count + x/y pairs */
+                if (message->attribute.id >= SHS_ATTR_ZONE_POLY_BASE_CFG &&
+                    message->attribute.id <= SHS_ATTR_ZONE_POLY_LAST_CFG) {
+                    int rel = message->attribute.id - SHS_ATTR_ZONE_POLY_BASE_CFG;
+                    int zone = rel / SHS_ATTR_ZONE_POLY_STRIDE;
+                    int offset = rel % SHS_ATTR_ZONE_POLY_STRIDE;
+                    if (offset == 0) {
+                        shs_zone_poly_n[zone] = (v8 > LD2450_MAX_ZONE_POINTS) ? LD2450_MAX_ZONE_POINTS : v8;
+                        ESP_LOGI(SHS_TAG, "Zone %d Polygon Points = %d", zone + 1, shs_zone_poly_n[zone]);
+                    } else if (offset <= LD2450_MAX_ZONE_POINTS * 2) {
+                        int idx = offset - 1;
+                        shs_zone_poly_xy[zone][idx] = v16s;
+                        ESP_LOGI(SHS_TAG, "Zone %d Polygon %c%d = %d", zone + 1,
+                                 (idx % 2) ? 'Y' : 'X', idx / 2, v16s);
+                    } else {
+                        break;
+                    }
+                    shs_zone_cfg_schedule_apply();
+                    return ESP_OK;
+                }
                 break;
         }
     }
@@ -2804,6 +2864,17 @@ static void shs_zigbee_task(void *pvParameters) {
         for (int i = 0; i < LD2450_MAX_BOUNDARY_POINTS * 2; i++) {
             esp_zb_custom_cluster_add_custom_attr(cfg_cl, SHS_ATTR_BOUNDARY_FIRST_CFG + i,
                 ESP_ZB_ZCL_ATTR_TYPE_S16, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, &shs_boundary_xy[i]);
+        }
+
+        /* Zone polygons: per zone, point count + 8 x/y pairs */
+        for (int z = 0; z < LD2450_MAX_ZONES; z++) {
+            uint16_t base = SHS_ATTR_ZONE_POLY_BASE_CFG + z * SHS_ATTR_ZONE_POLY_STRIDE;
+            esp_zb_custom_cluster_add_custom_attr(cfg_cl, base,
+                ESP_ZB_ZCL_ATTR_TYPE_U8, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, &shs_zone_poly_n[z]);
+            for (int i = 0; i < LD2450_MAX_ZONE_POINTS * 2; i++) {
+                esp_zb_custom_cluster_add_custom_attr(cfg_cl, base + 1 + i,
+                    ESP_ZB_ZCL_ATTR_TYPE_S16, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, &shs_zone_poly_xy[z][i]);
+            }
         }
 
         esp_zb_cluster_list_add_custom_cluster(cl, cfg_cl, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);

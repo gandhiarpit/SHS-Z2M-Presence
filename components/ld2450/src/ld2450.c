@@ -77,10 +77,14 @@ uint16_t ld2450_calc_angle(int16_t x, int16_t y) {
 }
 
 /**
- * @brief Check if point is inside rectangular zone
+ * @brief Check if point is inside a zone: its polygon if set, otherwise its rectangle
  */
 bool ld2450_point_in_zone(int16_t x, int16_t y, const ld2450_zone_t *zone) {
     if (!zone || !zone->enabled) return false;
+
+    if (zone->poly_count >= 3) {
+        return ld2450_point_in_polygon(x, y, zone->poly_xy, zone->poly_count);
+    }
 
     int16_t x_min = zone->x1 < zone->x2 ? zone->x1 : zone->x2;
     int16_t x_max = zone->x1 > zone->x2 ? zone->x1 : zone->x2;
@@ -108,15 +112,15 @@ void ld2450_set_boundary(const int16_t *xy, uint8_t count) {
 }
 
 /**
- * @brief Check if point is inside the room boundary (ray casting, integer math)
+ * @brief Check if point is inside a polygon (ray casting, integer math)
  */
-bool ld2450_point_in_boundary(int16_t x, int16_t y) {
-    if (s_boundary_count < 3) return true;
+bool ld2450_point_in_polygon(int16_t x, int16_t y, const int16_t *xy, uint8_t count) {
+    if (!xy || count < 3) return false;
 
     bool inside = false;
-    for (int i = 0, j = s_boundary_count - 1; i < s_boundary_count; j = i++) {
-        int32_t xi = s_boundary_xy[i * 2], yi = s_boundary_xy[i * 2 + 1];
-        int32_t xj = s_boundary_xy[j * 2], yj = s_boundary_xy[j * 2 + 1];
+    for (int i = 0, j = count - 1; i < count; j = i++) {
+        int32_t xi = xy[i * 2], yi = xy[i * 2 + 1];
+        int32_t xj = xy[j * 2], yj = xy[j * 2 + 1];
 
         if ((yi > y) != (yj > y)) {
             /* x < xi + (xj - xi) * (y - yi) / (yj - yi), multiplied out to avoid division */
@@ -128,6 +132,14 @@ bool ld2450_point_in_boundary(int16_t x, int16_t y) {
         }
     }
     return inside;
+}
+
+/**
+ * @brief Check if point is inside the room boundary
+ */
+bool ld2450_point_in_boundary(int16_t x, int16_t y) {
+    if (s_boundary_count < 3) return true;
+    return ld2450_point_in_polygon(x, y, s_boundary_xy, s_boundary_count);
 }
 
 /**
@@ -668,9 +680,33 @@ esp_err_t ld2450_clear_zone(uint8_t zone_num) {
     s_state.zone_config.zones[zone_num].y1 = 0;
     s_state.zone_config.zones[zone_num].x2 = 0;
     s_state.zone_config.zones[zone_num].y2 = 0;
+    s_state.zone_config.zones[zone_num].poly_count = 0;
     s_state.zone_config.zones[zone_num].occupied = false;
 
     ESP_LOGI(TAG, "Zone %d cleared", zone_num);
+
+    return ld2450_apply_zones();
+}
+
+/**
+ * @brief Set the polygon shape of a zone
+ */
+esp_err_t ld2450_set_zone_polygon(uint8_t zone_num, const int16_t *xy, uint8_t count) {
+    if (zone_num >= LD2450_MAX_ZONES) {
+        ESP_LOGE(TAG, "Invalid zone number: %d", zone_num);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ld2450_zone_t *zone = &s_state.zone_config.zones[zone_num];
+    if (!xy || count < 3) {
+        zone->poly_count = 0;
+        return ld2450_apply_zones();
+    }
+    if (count > LD2450_MAX_ZONE_POINTS) count = LD2450_MAX_ZONE_POINTS;
+
+    memcpy(zone->poly_xy, xy, count * 2 * sizeof(int16_t));
+    zone->poly_count = count;
+    ESP_LOGI(TAG, "Zone %d polygon set: %d points", zone_num, count);
 
     return ld2450_apply_zones();
 }

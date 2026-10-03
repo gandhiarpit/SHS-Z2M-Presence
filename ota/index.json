@@ -1,17 +1,17 @@
 [
   {
-    "fileName": "SHS_Z2M_Presence_v1.2.0.ota",
-    "url": "https://github.com/notownblues/SHS-Z2M-Presence/releases/download/v1.2.0/SHS_Z2M_Presence_v1.2.0.ota",
-    "fileVersion": 16908288,
-    "fileSize": 704622,
+    "fileName": "SHS_Z2M_Presence_v1.3.0.ota",
+    "url": "https://github.com/notownblues/SHS-Z2M-Presence/releases/download/v1.3.0/SHS_Z2M_Presence_v1.3.0.ota",
+    "fileVersion": 16973824,
+    "fileSize": 705822,
     "manufacturerCode": 4891,
     "imageType": 21249,
-    "sha512": "8db2f0f06abfca739361c369e4c871ec6e0bfec825996ce3cdc3f4fe5a31db0fc5e56ba652490bc9bb025f0e2c1d3aa38fcf5df058234aa341c599881a51bdf2",
-    "otaHeaderString": "SHS-Z2M-Presence v1.2.0",
+    "sha512": "c3137327ca6e41598bbc40f5ede5090757b8ec5a5d12b3e3e8fd674322a4b863a0009ebd095de33baf203ceb0347b69032c36bac2bf875ff9cf03b6aa3ded2b5",
+    "otaHeaderString": "SHS-Z2M-Presence v1.3.0",
     "modelId": "SHS-Z2M-Presence",
     "manufacturerName": [
       "SmartHomeScene"
     ],
-    "releaseNotes": "Adds Zigbee OTA updates via Zigbee2MQTT"
+    "releaseNotes": "Polygon zones: room-aligned zones for corner mounts"
   }
 ]

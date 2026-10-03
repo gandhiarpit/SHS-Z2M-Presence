@@ -102,6 +102,11 @@ const ATTR_ZONE5_TYPE_CFG = 0x0066;
 const ATTR_BOUNDARY_COUNT_CFG = 0x0070;  // uint8, 0-8 points (< 3 = no boundary)
 const ATTR_BOUNDARY_FIRST_CFG = 0x0071;  // int16 x0, y0, x1, y1, ... x7, y7 (0x0071-0x0080)
 const BOUNDARY_MAX_POINTS = 8;
+// Zone polygons (firmware v1.3.0+): zone N block at 0x0100 + (N-1) * 0x20;
+// +0 = point count (uint8, < 3 = use the zone rectangle), +1..+16 = int16 x0, y0, ... x7, y7
+const ATTR_ZONE_POLY_BASE_CFG = 0x0100;
+const ATTR_ZONE_POLY_STRIDE = 0x20;
+const ZONE_POLY_MAX_POINTS = 8;
 
 // Zone 4 configuration attributes
 const ATTR_ZONE4_ENABLED = 0x0050;
@@ -568,6 +573,40 @@ const definition = {
                         console.log(`SHS01 ZONE: Written boundary (${count} points)`);
                     } catch (e) {
                         console.log(`SHS01 ZONE: Failed to write boundary count:`, e.message);
+                    }
+                }
+
+                // Zone polygons: zoneN_polygon = array of up to 8 {x, y} points (sensor coordinates, mm).
+                // Used by the firmware instead of the zone rectangle; [] clears it. Each zone is sent
+                // as one multi-attribute write, falling back to single writes if the device rejects it.
+                // Firmware older than v1.3.0 rejects these attributes and keeps using the rectangle.
+                for (let z = 1; z <= 5; z++) {
+                    const polygon = value[`zone${z}_polygon`];
+                    if (!Array.isArray(polygon)) continue;
+                    const points = polygon.slice(0, ZONE_POLY_MAX_POINTS);
+                    const count = points.length >= 3 ? points.length : 0;
+                    const toInt16 = (v) => Math.max(-32768, Math.min(32767, Math.round(Number(v) || 0)));
+                    const base = ATTR_ZONE_POLY_BASE_CFG + (z - 1) * ATTR_ZONE_POLY_STRIDE;
+                    const attrs = {};
+                    for (let i = 0; i < count; i++) {
+                        attrs[base + 1 + i * 2] = {value: toInt16(points[i].x), type: 0x29};
+                        attrs[base + 2 + i * 2] = {value: toInt16(points[i].y), type: 0x29};
+                    }
+                    attrs[base] = {value: count, type: 0x20};
+                    try {
+                        await endpoint.write(CLUSTER_CONFIG, attrs);
+                        console.log(`SHS01 ZONE: Written zone${z}_polygon (${count} points)`);
+                    } catch (e) {
+                        console.log(`SHS01 ZONE: Batched zone${z}_polygon write failed (${e.message}), writing one by one`);
+                        // Count last, so the firmware never sees a count with missing points
+                        const ids = Object.keys(attrs).map(Number).filter((id) => id !== base).concat(base);
+                        for (const id of ids) {
+                            try {
+                                await endpoint.write(CLUSTER_CONFIG, {[id]: attrs[id]});
+                            } catch (err) {
+                                console.log(`SHS01 ZONE: Failed to write zone${z}_polygon attribute 0x${id.toString(16)}:`, err.message);
+                            }
+                        }
                     }
                 }
 

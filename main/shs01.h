@@ -71,11 +71,11 @@
 
 /* Optional Basic metadata */
 #define SHS_BASIC_DATE_CODE             "2026-10-03"
-#define SHS_BASIC_SW_BUILD_ID           "v1.2.0"
+#define SHS_BASIC_SW_BUILD_ID           "v1.3.0"
 
 /* Zigbee OTA (client on EP1). File version format: 0xMMmmpp00 - must match
  * SHS_BASIC_SW_BUILD_ID (tools/make_release.py checks this) and increase every release. */
-#define SHS_OTA_FILE_VERSION            0x01020000
+#define SHS_OTA_FILE_VERSION            0x01030000
 #define SHS_OTA_MANUFACTURER_CODE       0x131B      /* Espressif (esp-zigbee-sdk default) */
 #define SHS_OTA_IMAGE_TYPE              0x5301      /* Unique to SHS-Z2M-Presence */
 #define SHS_OTA_HW_VERSION              0x0001
@@ -153,6 +153,14 @@
 #define SHS_ATTR_BOUNDARY_COUNT_CFG     0x0070  /* uint8, 0-8 points */
 #define SHS_ATTR_BOUNDARY_FIRST_CFG     0x0071  /* int16 mm: x0, y0, x1, y1, ... x7, y7 */
 #define SHS_ATTR_BOUNDARY_LAST_CFG      0x0080  /* (16 attributes, 0x0071-0x0080) */
+
+/* Zone polygons (on Config cluster 0xFDCD): optional shape per zone, sensor coordinates.
+ * When the point count is 3 or more the polygon is used instead of the zone rectangle.
+ * Zone N (1-5) block: base = 0x0100 + (N-1) * 0x20; +0 = point count (uint8, 0-8),
+ * +1..+16 = int16 mm x0, y0, x1, y1, ... x7, y7. Zone 1: 0x0100-0x0110, zone 5: 0x0180-0x0190. */
+#define SHS_ATTR_ZONE_POLY_BASE_CFG     0x0100
+#define SHS_ATTR_ZONE_POLY_STRIDE       0x0020
+#define SHS_ATTR_ZONE_POLY_LAST_CFG     0x0190
 
 /* ============================================================================
  * OCCUPANCY CLUSTER CUSTOM ATTRIBUTES (on EP2)
