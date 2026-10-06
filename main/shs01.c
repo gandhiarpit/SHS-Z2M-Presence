@@ -143,6 +143,7 @@ static uint32_t shs_last_successful_tx = 0;
 static volatile bool shs_ota_active = false;  /* OTA download in progress - suppresses rejoin logic */
 #define SHS_ZB_LOCK_TIMEOUT_MS     100    /* Timeout for Zigbee lock acquisition */
 #define SHS_ZB_CONNECTIVITY_CHECK_MS  60000  /* Check connectivity every 60s */
+#define SHS_LD2410_RESYNC_MS          60000  /* Re-report LD2410 occupancy/moving/static every 60s */
 
 /* Diagnostic counters for lock acquisition */
 static uint32_t shs_lock_success_count = 0;
@@ -686,12 +687,14 @@ static bool shs_zb_set_occ_bitmap(uint8_t endpoint, bool occupied) {
     return true;
 }
 
-static void shs_zb_set_bool_attr(uint8_t endpoint, uint16_t cluster, uint16_t attr_id, bool value) {
-    if (!shs_zb_ready) return;
+/* Set bool attribute - returns true if successful, false if Zigbee not ready or lock failed */
+static bool shs_zb_set_bool_attr(uint8_t endpoint, uint16_t cluster, uint16_t attr_id, bool value) {
+    if (!shs_zb_ready) return false;
     bool v = value;
-    SHS_ZB_LOCK_ACQUIRE_OR_RETURN();
+    SHS_ZB_LOCK_ACQUIRE_OR_RETURN_FALSE();
     esp_zb_zcl_set_attribute_val(endpoint, cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, attr_id, &v, false);
     esp_zb_lock_release();
+    return true;
 }
 
 /* Explicit attribute report sender - sends report directly to coordinator */
@@ -803,17 +806,23 @@ static void shs_on_state_change(const ld2410_state_t *state) {
         }
     }
 
+    /* Only update local state if the Zigbee write succeeds - otherwise a lock timeout
+     * leaves the attribute stale and the change is never retried. The driver calls
+     * this callback at least once per second, so a failed write retries promptly. */
     if (report_moving != shs_moving_state) {
-        shs_moving_state = report_moving;
-        if (shs_moving_state) {
-            /* Log the values that passed the filter for debugging false positives */
-            ESP_LOGI(SHS_TAG, "Moving Target -> DETECTED (dist=%dcm, energy=%d)",
-                     state->target.moving_distance, state->target.moving_energy);
-        } else {
-            ESP_LOGI(SHS_TAG, "Moving Target -> CLEAR");
+        if (shs_zb_set_bool_attr(SHS_EP_OCC, ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
+                                 SHS_ATTR_OCC_MOVING_TARGET, report_moving)) {
+            shs_moving_state = report_moving;
+            if (shs_moving_state) {
+                /* Log the values that passed the filter for debugging false positives */
+                ESP_LOGI(SHS_TAG, "Moving Target -> DETECTED (dist=%dcm, energy=%d)",
+                         state->target.moving_distance, state->target.moving_energy);
+            } else {
+                ESP_LOGI(SHS_TAG, "Moving Target -> CLEAR");
+            }
+        } else if (shs_zb_ready) {
+            ESP_LOGW(SHS_TAG, "Moving Target report FAILED - will retry");
         }
-        shs_zb_set_bool_attr(SHS_EP_OCC, ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
-                            SHS_ATTR_OCC_MOVING_TARGET, shs_moving_state);
     }
 
     /* STATIC TARGET with cooldown (uses occupancy_clear_sec) */
@@ -832,25 +841,47 @@ static void shs_on_state_change(const ld2410_state_t *state) {
     }
 
     if (report_static != shs_static_state) {
-        shs_static_state = report_static;
-        if (shs_static_state) {
-            /* Log the values that passed the filter for debugging false positives */
-            ESP_LOGI(SHS_TAG, "Static Target -> DETECTED (dist=%dcm, energy=%d)",
-                     state->target.static_distance, state->target.static_energy);
-        } else {
-            ESP_LOGI(SHS_TAG, "Static Target -> CLEAR");
+        if (shs_zb_set_bool_attr(SHS_EP_OCC, ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
+                                 SHS_ATTR_OCC_STATIC_TARGET, report_static)) {
+            shs_static_state = report_static;
+            if (shs_static_state) {
+                /* Log the values that passed the filter for debugging false positives */
+                ESP_LOGI(SHS_TAG, "Static Target -> DETECTED (dist=%dcm, energy=%d)",
+                         state->target.static_distance, state->target.static_energy);
+            } else {
+                ESP_LOGI(SHS_TAG, "Static Target -> CLEAR");
+            }
+        } else if (shs_zb_ready) {
+            ESP_LOGW(SHS_TAG, "Static Target report FAILED - will retry");
         }
-        shs_zb_set_bool_attr(SHS_EP_OCC, ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
-                            SHS_ATTR_OCC_STATIC_TARGET, shs_static_state);
     }
 
     /* OCCUPANCY = presence with cooldowns applied */
     bool presence = report_moving || report_static;
 
     if (presence != shs_occupancy_state) {
-        shs_occupancy_state = presence;
-        ESP_LOGI(SHS_TAG, "Occupancy -> %s", presence ? "DETECTED" : "CLEAR");
-        shs_zb_set_occ_bitmap(SHS_EP_OCC, presence);
+        if (shs_zb_set_occ_bitmap(SHS_EP_OCC, presence)) {
+            shs_occupancy_state = presence;
+            ESP_LOGI(SHS_TAG, "Occupancy -> %s", presence ? "DETECTED" : "CLEAR");
+        } else if (shs_zb_ready) {
+            ESP_LOGW(SHS_TAG, "Occupancy report FAILED - will retry");
+        }
+    }
+
+    /* Periodic resync: explicitly re-report the EP2 states so a report lost over the
+     * air can't leave Z2M/HA out of sync until the 1h max reporting interval. */
+    static uint32_t last_resync_ms = 0;
+    if (shs_zb_ready && shs_zb_connected && !shs_zb_rejoin_pending &&
+        (now_ms - last_resync_ms) >= SHS_LD2410_RESYNC_MS) {
+        last_resync_ms = now_ms;
+        shs_zb_report_attr(SHS_EP_OCC, ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
+                           ESP_ZB_ZCL_ATTR_OCCUPANCY_SENSING_OCCUPANCY_ID, false);
+        shs_zb_report_attr(SHS_EP_OCC, ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
+                           SHS_ATTR_OCC_MOVING_TARGET, false);
+        shs_zb_report_attr(SHS_EP_OCC, ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
+                           SHS_ATTR_OCC_STATIC_TARGET, false);
+        ESP_LOGD(SHS_TAG, "LD2410 resync sent (occ=%d moving=%d static=%d)",
+                 shs_occupancy_state, shs_moving_state, shs_static_state);
     }
 }
 

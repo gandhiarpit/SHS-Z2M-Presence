@@ -70,12 +70,12 @@
 #define SHS_MODEL_IDENTIFIER            "\x10SHS-Z2M-Presence"
 
 /* Optional Basic metadata */
-#define SHS_BASIC_DATE_CODE             "2026-10-03"
-#define SHS_BASIC_SW_BUILD_ID           "v1.3.0"
+#define SHS_BASIC_DATE_CODE             "2026-10-06"
+#define SHS_BASIC_SW_BUILD_ID           "v1.3.1"
 
 /* Zigbee OTA (client on EP1). File version format: 0xMMmmpp00 - must match
  * SHS_BASIC_SW_BUILD_ID (tools/make_release.py checks this) and increase every release. */
-#define SHS_OTA_FILE_VERSION            0x01030000
+#define SHS_OTA_FILE_VERSION            0x01030100
 #define SHS_OTA_MANUFACTURER_CODE       0x131B      /* Espressif (esp-zigbee-sdk default) */
 #define SHS_OTA_IMAGE_TYPE              0x5301      /* Unique to SHS-Z2M-Presence */
 #define SHS_OTA_HW_VERSION              0x0001
