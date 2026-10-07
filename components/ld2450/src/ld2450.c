@@ -79,10 +79,14 @@ uint16_t ld2450_calc_angle(int16_t x, int16_t y) {
 }
 
 /**
- * @brief Check if point is inside rectangular zone
+ * @brief Check if point is inside a zone: its polygon if set, otherwise its rectangle
  */
 bool ld2450_point_in_zone(int16_t x, int16_t y, const ld2450_zone_t *zone) {
     if (!zone || !zone->enabled) return false;
+
+    if (zone->poly_count >= 3) {
+        return ld2450_point_in_polygon(x, y, zone->poly_xy, zone->poly_count);
+    }
 
     int16_t x_min = zone->x1 < zone->x2 ? zone->x1 : zone->x2;
     int16_t x_max = zone->x1 > zone->x2 ? zone->x1 : zone->x2;
@@ -90,6 +94,54 @@ bool ld2450_point_in_zone(int16_t x, int16_t y, const ld2450_zone_t *zone) {
     int16_t y_max = zone->y1 > zone->y2 ? zone->y1 : zone->y2;
 
     return (x >= x_min && x <= x_max && y >= y_min && y <= y_max);
+}
+
+/* Room boundary polygon (sensor coordinates). Fewer than 3 points = no boundary. */
+static int16_t s_boundary_xy[LD2450_MAX_BOUNDARY_POINTS * 2];
+static uint8_t s_boundary_count = 0;
+
+void ld2450_set_boundary(const int16_t *xy, uint8_t count) {
+    if (!xy || count < 3) {
+        s_boundary_count = 0;
+        ESP_LOGI(TAG, "Room boundary disabled");
+        return;
+    }
+    if (count > LD2450_MAX_BOUNDARY_POINTS) count = LD2450_MAX_BOUNDARY_POINTS;
+
+    memcpy(s_boundary_xy, xy, count * 2 * sizeof(int16_t));
+    s_boundary_count = count;
+    ESP_LOGI(TAG, "Room boundary set: %d points", count);
+}
+
+/**
+ * @brief Check if point is inside a polygon (ray casting, integer math)
+ */
+bool ld2450_point_in_polygon(int16_t x, int16_t y, const int16_t *xy, uint8_t count) {
+    if (!xy || count < 3) return false;
+
+    bool inside = false;
+    for (int i = 0, j = count - 1; i < count; j = i++) {
+        int32_t xi = xy[i * 2], yi = xy[i * 2 + 1];
+        int32_t xj = xy[j * 2], yj = xy[j * 2 + 1];
+
+        if ((yi > y) != (yj > y)) {
+            /* x < xi + (xj - xi) * (y - yi) / (yj - yi), multiplied out to avoid division */
+            int64_t lhs = (int64_t)(x - xi) * (yj - yi);
+            int64_t rhs = (int64_t)(xj - xi) * (y - yi);
+            if ((yj > yi) ? (lhs < rhs) : (lhs > rhs)) {
+                inside = !inside;
+            }
+        }
+    }
+    return inside;
+}
+
+/**
+ * @brief Check if point is inside the room boundary
+ */
+bool ld2450_point_in_boundary(int16_t x, int16_t y) {
+    if (s_boundary_count < 3) return true;
+    return ld2450_point_in_polygon(x, y, s_boundary_xy, s_boundary_count);
 }
 
 /**
@@ -140,6 +192,9 @@ static void update_zone_occupancy(void) {
         int16_t x = s_state.targets[t].x;
         int16_t y = s_state.targets[t].y;
 
+        // Targets outside the room boundary don't count for any zone
+        if (!ld2450_point_in_boundary(x, y)) continue;
+
         // Check which zones contain this target
         for (int z = 0; z < LD2450_MAX_ZONES; z++) {
             if (s_state.zone_config.zones[z].enabled) {
@@ -180,6 +235,7 @@ static void update_zone_occupancy(void) {
                 bool in_any_zone = false;
                 int16_t x = s_state.targets[t].x;
                 int16_t y = s_state.targets[t].y;
+                if (!ld2450_point_in_boundary(x, y)) continue;
 
                 for (int z = 0; z < LD2450_MAX_ZONES; z++) {
                     if (s_state.zone_config.zones[z].enabled &&
@@ -206,6 +262,7 @@ static void update_zone_occupancy(void) {
                 bool in_any_zone = false;
                 int16_t x = s_state.targets[t].x;
                 int16_t y = s_state.targets[t].y;
+                if (!ld2450_point_in_boundary(x, y)) continue;
 
                 for (int z = 0; z < LD2450_MAX_ZONES; z++) {
                     if (s_state.zone_config.zones[z].enabled &&
@@ -709,9 +766,33 @@ esp_err_t ld2450_clear_zone(uint8_t zone_num) {
     s_state.zone_config.zones[zone_num].y1 = 0;
     s_state.zone_config.zones[zone_num].x2 = 0;
     s_state.zone_config.zones[zone_num].y2 = 0;
+    s_state.zone_config.zones[zone_num].poly_count = 0;
     s_state.zone_config.zones[zone_num].occupied = false;
 
     ESP_LOGI(TAG, "Zone %d cleared", zone_num);
+
+    return ld2450_apply_zones();
+}
+
+/**
+ * @brief Set the polygon shape of a zone
+ */
+esp_err_t ld2450_set_zone_polygon(uint8_t zone_num, const int16_t *xy, uint8_t count) {
+    if (zone_num >= LD2450_MAX_ZONES) {
+        ESP_LOGE(TAG, "Invalid zone number: %d", zone_num);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ld2450_zone_t *zone = &s_state.zone_config.zones[zone_num];
+    if (!xy || count < 3) {
+        zone->poly_count = 0;
+        return ld2450_apply_zones();
+    }
+    if (count > LD2450_MAX_ZONE_POINTS) count = LD2450_MAX_ZONE_POINTS;
+
+    memcpy(zone->poly_xy, xy, count * 2 * sizeof(int16_t));
+    zone->poly_count = count;
+    ESP_LOGI(TAG, "Zone %d polygon set: %d points", zone_num, count);
 
     return ld2450_apply_zones();
 }
@@ -730,10 +811,13 @@ esp_err_t ld2450_set_zone_type(ld2450_zone_type_t type) {
 }
 
 /**
- * @brief Apply zone configuration to sensor
+ * @brief Re-evaluate zone occupancy after a zone configuration change
  *
- * Note: The LD2450 zone configuration protocol may vary by firmware version.
- * This implements a generic approach. Adjust based on actual protocol specs.
+ * Zones are evaluated in software on the ESP32 (update_zone_occupancy), which
+ * supports 5 zones plus the room boundary. Nothing is sent to the radar: its own
+ * region filter (command 0x00C2) only supports 3 zones. A previous version sent
+ * command 0x0080 here, which on the LD2450 means "single target tracking mode",
+ * in a malformed frame that the radar ignored.
  */
 /**
  * @brief Start batching zone changes - set/clear calls stop applying immediately
@@ -743,7 +827,7 @@ void ld2450_begin_zone_batch(void) {
 }
 
 /**
- * @brief End batching and push every zone to the sensor in one config session
+ * @brief End batching and re-evaluate zone occupancy once
  */
 esp_err_t ld2450_end_zone_batch(void) {
     s_zone_batch = false;
@@ -758,70 +842,7 @@ esp_err_t ld2450_exit_config_mode(void) {
 }
 
 esp_err_t ld2450_apply_zones(void) {
-    esp_err_t ret;
-
-    /* While batching, callers are still filling in local zone state; the
-     * single apply happens in ld2450_end_zone_batch(). Without this each
-     * set/clear ran its own enter-write-exit cycle - five sessions to
-     * configure five zones. */
-    if (s_zone_batch) {
-        return ESP_OK;
-    }
-
-    // Enter config mode
-    ret = enter_config_mode();
-    if (ret != ESP_OK) {
-        /* Do NOT return here. The most likely reason for a failure status is
-         * that the module is already in config mode from an earlier attempt,
-         * and config mode stops the target data stream. Returning early was
-         * what left the sensor parked in config mode with no data at all. */
-        ESP_LOGW(TAG, "Enter config mode failed - exiting config mode anyway");
-        exit_config_mode();
-        return ret;
-    }
-
-    vTaskDelay(pdMS_TO_TICKS(50));
-
-    // Send zone configuration for each zone
-    // Protocol: zone commands with coordinates
-    for (int i = 0; i < LD2450_MAX_ZONES; i++) {
-        uint8_t params[10];
-        int param_len = 0;
-
-        params[param_len++] = i;  // Zone number
-
-        if (s_state.zone_config.zones[i].enabled) {
-            // Zone coordinates (little-endian)
-            params[param_len++] = s_state.zone_config.zones[i].x1 & 0xFF;
-            params[param_len++] = (s_state.zone_config.zones[i].x1 >> 8) & 0xFF;
-            params[param_len++] = s_state.zone_config.zones[i].y1 & 0xFF;
-            params[param_len++] = (s_state.zone_config.zones[i].y1 >> 8) & 0xFF;
-            params[param_len++] = s_state.zone_config.zones[i].x2 & 0xFF;
-            params[param_len++] = (s_state.zone_config.zones[i].x2 >> 8) & 0xFF;
-            params[param_len++] = s_state.zone_config.zones[i].y2 & 0xFF;
-            params[param_len++] = (s_state.zone_config.zones[i].y2 >> 8) & 0xFF;
-            params[param_len++] = 0x01;  // Enable flag
-        } else {
-            // Disabled zone - all zeros
-            for (int j = 0; j < 9; j++) params[param_len++] = 0x00;
-        }
-
-        ret = send_command(LD2450_CMD_SET_ZONE, params, param_len, false);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to send zone %d config", i);
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(20));
-    }
-
-    // Exit config mode - the data stream stays off until this lands
-    ret = exit_config_mode();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to exit config mode - data stream will stay stopped");
-        return ret;
-    }
-
-    ESP_LOGI(TAG, "Zone configuration applied");
+    update_zone_occupancy();
     return ESP_OK;
 }
 

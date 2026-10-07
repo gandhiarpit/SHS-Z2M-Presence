@@ -30,7 +30,9 @@ jobs:
         with:
           esp_idf_version: v5.5.2
           target: esp32c6
-          command: idf.py build && (idf.py merge-bin || esptool.py --chip esp32c6 merge_bin --format raw -o build/merged-binary.bin --flash-size 2MB 0x0 build/bootloader/bootloader.bin 0x8000 build/partition_table/partition-table.bin 0x10000 build/SHS_Z2M_Presence.bin)
+          # make_release.py leaves otadata out of the merged bin: merge_bin pads gaps
+          # with 0xFF, so including it would wipe zb_storage and unpair the device.
+          command: idf.py build && python tools/make_release.py --no-index
 
       - name: Name the artifacts
         id: name
@@ -47,7 +49,8 @@ jobs:
             NAME="SHS_Z2M_Presence_${VER}_${GITHUB_SHA::7}_merged.bin"
           fi
           mkdir -p dist
-          cp build/merged-binary.bin "dist/${NAME}"
+          cp build/release/*_merged.bin "dist/${NAME}"
+          cp build/release/*.ota dist/
           cp build/bootloader/bootloader.bin dist/
           cp build/partition_table/partition-table.bin dist/
           cp build/SHS_Z2M_Presence.bin dist/

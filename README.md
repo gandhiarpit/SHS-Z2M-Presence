@@ -189,9 +189,12 @@ plants under air vents and pets all read as targets.
 
 - **Dual Sensor Cross-Validation**: LD2410C and LD2450 work together to reduce false positives
 - **Multi-Zone Support**: Up to 5 configurable zones with different operation modes
+- **Zone Shapes**: Each zone is a rectangle or a polygon of up to 8 corners, so zones can follow the walls on a corner mount
 - **Multi-Target Tracking**: Track up to 3 simultaneous targets with X/Y positions
 - **Zone Types**: Detection (inclusion), Filter (exclusion), and Interference (false positive filtering)
+- **Room Boundary**: Ignore targets outside your room's outline (up to 8 corners), without using a zone
 - **Zigbee Router Mode**: Stable connection that also extends your Zigbee mesh
+- **Wireless Updates (OTA)**: Update the firmware from the Zigbee2MQTT OTA tab, no USB needed (v1.2.0+, see [OTA Updates](#ota-updates-via-zigbee2mqtt))
 - **Persistent Configuration**: Zone settings saved to flash memory
 
 ---
@@ -202,7 +205,7 @@ plants under air vents and pets all read as targets.
 
   The easiest way to flash the firmware (no development environment needed).
 
-  1. Download `SHS01_vX.X.X_merged.bin` from the [Releases page](https://github.com/notownblues/SHS-Z2M-Presence/releases)
+  1. Download `SHS_Z2M_Presence_vX.X.X_merged.bin` from the [Releases page](https://github.com/notownblues/SHS-Z2M-Presence/releases)
 
   2. Go to [ESPHome Web Tool](https://web.esphome.io/)
 
@@ -215,6 +218,8 @@ plants under air vents and pets all read as targets.
   6. Click **"INSTALL"** and wait for completion (~15 seconds)
 
   > **Tip:** If the device isn't detected, hold the **BOOT** button while plugging in the USB cable, then try again.
+
+  > **Note:** From v1.2.0 the firmware uses a 4MB flash layout with two app slots for [OTA updates](#ota-updates-via-zigbee2mqtt). Once a device runs v1.2.0 or later, it can be updated wirelessly from Zigbee2MQTT instead of over USB.
 
   ### Option 2: Build from Source
 
@@ -254,6 +259,46 @@ Download the correct converter from the [Releases page](https://github.com/notow
 Restart Zigbee2MQTT for the changes to take effect. Your device should now expose all available entities.
 
 If some or all entities show as "Null" or "N/A", click the "Configure" button straight after pairing to refresh the states.
+
+---
+
+## OTA Updates via Zigbee2MQTT
+
+From firmware **v1.2.0**, the sensor can be updated over Zigbee from the Zigbee2MQTT **OTA** tab, so you don't have to unmount it and plug in USB.
+
+### One-time setup
+
+1. **Flash the latest firmware over USB** (v1.2.0 or newer) using [Firmware Flashing](#firmware-flashing). Older firmware has no room for a second app slot, so this one flash must be done by cable. Every later update can go over the air.
+   > **Note:** Flashing a merged `.bin` resets the settings stored on the device (sensitivities, cooldowns, zones and room boundary) to their defaults. Zigbee pairing data is stored in a separate area that isn't touched, so the sensor normally stays paired. If it doesn't reappear in Z2M, pair it again. Afterwards, send your zones again with **Save to Sensor** in the Zone Configurator add-on.
+2. **Update the converter** to the latest `shs01_enhanced.mjs` (or `.js` for Zigbee2MQTT 1.x) from the [Releases page](https://github.com/notownblues/SHS-Z2M-Presence/releases) and restart Zigbee2MQTT.
+3. **Re-interview the device:** in Z2M open the device, go to **About**, and click **Interview**. Z2M learns about the OTA cluster during the interview.
+4. **Add the OTA index to `configuration.yaml`** (see below), then restart Zigbee2MQTT.
+
+### Adding the OTA index to configuration.yaml
+
+Zigbee2MQTT only knows about SHS01 updates once you point it at this repository's OTA index. Open Zigbee2MQTT's own `configuration.yaml`:
+
+- **Home Assistant add-on:** `/homeassistant/zigbee2mqtt/configuration.yaml` (edit it with the File editor or Studio Code Server add-on)
+- **Docker / standalone:** `data/configuration.yaml` in your Zigbee2MQTT folder
+
+Add an `ota:` section at the **top level** of the file. The end of the file is a good place, for example just before the `version:` line:
+
+```yaml
+blocklist: []
+ota:
+  zigbee_ota_override_index_location:
+    https://raw.githubusercontent.com/notownblues/SHS-Z2M-Presence/main/ota/index.json
+version: 5
+```
+
+Save the file and restart Zigbee2MQTT.
+
+### Updating
+
+1. In Z2M, open the **OTA** tab and click **Check for new updates** next to the sensor. Z2M also checks once a day on its own.
+2. If a newer version is listed, click **Update firmware**.
+3. Leave the sensor powered. With Z2M's default OTA settings, a full image (~700 KB) takes **about an hour**. The sensor keeps detecting and reporting during the download.
+4. When the download finishes, the sensor restarts into the new firmware and reconnects.
 
 ---
 
@@ -360,6 +405,28 @@ The sensor supports 4 zone operation modes:
 | **Detection** | Only detect targets INSIDE zones | Focus on specific areas (bed, desk, couch) |
 | **Filter** | Ignore targets INSIDE zones | Exclude areas (doorways, windows with moving curtains) |
 | **Interference** | Treat targets as false positives | Filter reflections and sensor artifacts |
+
+The global **Zone Mode** (Off / Include / Exclude) decides how Detection zones affect the main occupancy:
+
+- **Off**: every target counts.
+- **Include**: only targets inside a Detection zone count.
+- **Exclude**: only targets outside all Detection zones count.
+
+Interference zones are always ignored, whatever the mode. If no Detection zones are enabled, every target outside Interference zones counts.
+
+## Zone Shapes
+
+Zones are rectangles along the sensor's own axes. Since firmware v1.3.0 each zone can instead be a polygon of up to 8 corners. That matters for a corner mount: the sensor's axes are then at 45° to the walls, so a zone that is square to the room (over a dining table, say) is a tilted shape for the sensor. The [Zone Configurator add-on](https://github.com/notownblues/SHS-Z2M-Presence-Zones) (v2.10.0+) sends polygons automatically. Polygon zones work with every zone type and Zone Mode, and are stored in flash.
+
+Zigbee attributes (Config cluster `0xFDCD`, endpoint 1): zone N (1-5) uses the block starting at `0x0100 + (N-1) * 0x20`. `+0` is the point count (uint8, below 3 = use the rectangle) and `+1`..`+16` the x/y of up to 8 points (int16, mm, sensor coordinates), so zone 1 is `0x0100`-`0x0110` and zone 5 is `0x0180`-`0x0190`. The converter accepts them as `zone_config.zoneN_polygon: [{x, y}, ...]`; an empty array switches the zone back to its rectangle. Keep sending `zoneN_x1`..`zoneN_y2` as well: older firmware ignores the polygon and uses the rectangle.
+
+## Room Boundary
+
+Since firmware v1.1.0 the sensor can ignore targets outside a room outline, for example people seen through a wall. Draw it with the Room Outline tool in the [Zone Configurator add-on](https://github.com/notownblues/SHS-Z2M-Presence-Zones) and click Save to Sensor.
+
+Targets outside the outline don't count towards occupancy, the target count, zone occupancy, or the LD2410C cross-check. Position reporting still shows them, so the add-on can draw them faded. The outline is stored in flash and doesn't use any of the 5 zones.
+
+Zigbee attributes (Config cluster `0xFDCD`, endpoint 1): `0x0070` point count (uint8, below 3 = off) and `0x0071`-`0x0080` the x/y of up to 8 points (int16, mm, sensor coordinates). The converter accepts them as `zone_config.boundary: [{x, y}, ...]`.
 
 ---
 
