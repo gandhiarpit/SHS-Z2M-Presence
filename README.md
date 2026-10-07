@@ -205,7 +205,7 @@ plants under air vents and pets all read as targets.
 
   The easiest way to flash the firmware (no development environment needed).
 
-  1. Download `SHS_Z2M_Presence_vX.X.X_merged.bin` from the [Releases page](https://github.com/notownblues/SHS-Z2M-Presence/releases)
+  1. Download `SHS_Z2M_Presence_vX.X.X_merged.bin` from the [Releases page](https://github.com/gandhiarpit/SHS-Z2M-Presence/releases)
 
   2. Go to [ESPHome Web Tool](https://web.esphome.io/)
 
@@ -242,7 +242,7 @@ After pairing your sensor, you need to add the external converter to Zigbee2MQTT
 
 > **Note:** Zigbee2MQTT 2.0+ requires `.mjs` (ES Module) converters. If your device shows as `"NOT supported"` or the converter file gets renamed to `.invalid`, you need the `.mjs` version.
 
-Download the correct converter from the [Releases page](https://github.com/notownblues/SHS-Z2M-Presence/releases) and copy it to your Zigbee2MQTT external converters folder:
+Download the correct converter from the [Releases page](https://github.com/gandhiarpit/SHS-Z2M-Presence/releases) and copy it to your Zigbee2MQTT external converters folder:
 
 **For Home Assistant Add-on:**
 ```
@@ -270,7 +270,7 @@ From firmware **v1.2.0**, the sensor can be updated over Zigbee from the Zigbee2
 
 1. **Flash the latest firmware over USB** (v1.2.0 or newer) using [Firmware Flashing](#firmware-flashing). Older firmware has no room for a second app slot, so this one flash must be done by cable. Every later update can go over the air.
    > **Note:** Flashing a merged `.bin` resets the settings stored on the device (sensitivities, cooldowns, zones and room boundary) to their defaults. Zigbee pairing data is stored in a separate area that isn't touched, so the sensor normally stays paired. If it doesn't reappear in Z2M, pair it again. Afterwards, send your zones again with **Save to Sensor** in the Zone Configurator add-on.
-2. **Update the converter** to the latest `shs01_enhanced.mjs` (or `.js` for Zigbee2MQTT 1.x) from the [Releases page](https://github.com/notownblues/SHS-Z2M-Presence/releases) and restart Zigbee2MQTT.
+2. **Update the converter** to the latest `shs01_enhanced.mjs` (or `.js` for Zigbee2MQTT 1.x) from the [Releases page](https://github.com/gandhiarpit/SHS-Z2M-Presence/releases) and restart Zigbee2MQTT.
 3. **Re-interview the device:** in Z2M open the device, go to **About**, and click **Interview**. Z2M learns about the OTA cluster during the interview.
 4. **Add the OTA index to `configuration.yaml`** (see below), then restart Zigbee2MQTT.
 
@@ -287,7 +287,7 @@ Add an `ota:` section at the **top level** of the file. The end of the file is a
 blocklist: []
 ota:
   zigbee_ota_override_index_location:
-    https://raw.githubusercontent.com/notownblues/SHS-Z2M-Presence/main/ota/index.json
+    https://raw.githubusercontent.com/gandhiarpit/SHS-Z2M-Presence/main/ota/index.json
 version: 5
 ```
 
