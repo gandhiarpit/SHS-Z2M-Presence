@@ -376,7 +376,7 @@ Add an `ota:` section at the **top level** of the file. The end of the file is a
 blocklist: []
 ota:
   zigbee_ota_override_index_location:
-    https://raw.githubusercontent.com/gandhiarpit/SHS-Z2M-Presence/ld2412/ota/index.json
+    https://raw.githubusercontent.com/gandhiarpit/SHS-Z2M-Presence/main/ota/index.json
 version: 5
 ```
 
