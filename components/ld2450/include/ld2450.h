@@ -79,7 +79,8 @@ extern "C" {
 /* Command words */
 #define LD2450_CMD_ENABLE_CONFIG    0x00FF
 #define LD2450_CMD_END_CONFIG       0x00FE
-#define LD2450_CMD_SET_ZONE         0x0080
+#define LD2450_CMD_MULTI_TARGET     0x0090  /* 0x0080 is single-target mode: never send it */
+#define LD2450_CMD_QUERY_TARGET_MODE 0x0091 /* ACK payload byte 0: 0x01 single, 0x02 multi */
 #define LD2450_CMD_READ_VERSION     0x00A0
 #define LD2450_CMD_RESTART          0x00A3
 #define LD2450_CMD_FACTORY_RESET    0x00A2
@@ -304,6 +305,12 @@ esp_err_t ld2450_exit_config_mode(void);
  * @return ESP_OK on success
  */
 esp_err_t ld2450_read_firmware_version(void);
+
+/**
+ * @brief Switch the radar to multi-target tracking if it reports single-target
+ * @return ESP_OK on success
+ */
+esp_err_t ld2450_ensure_multi_target(void);
 
 /**
  * @brief Restart the sensor
