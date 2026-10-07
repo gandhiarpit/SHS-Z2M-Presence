@@ -77,12 +77,12 @@
 /* ZCL character strings: leading byte is the length. Kept as two adjacent
  * literals because a hex escape swallows any hex digits that follow it -
  * "\x0a2026-09-09" would parse as one out-of-range escape, not \n + "2026...". */
-#define SHS_BASIC_DATE_CODE             "\x0a" "2026-10-07"
-#define SHS_BASIC_SW_BUILD_ID           "\x06" "v1.4.0"
+#define SHS_BASIC_DATE_CODE             "\x0a" "2026-10-08"
+#define SHS_BASIC_SW_BUILD_ID           "\x06" "v1.4.1"
 
 /* Zigbee OTA (client on EP1). File version format: 0xMMmmpp00 - must match
  * SHS_BASIC_SW_BUILD_ID (tools/make_release.py checks this) and increase every release. */
-#define SHS_OTA_FILE_VERSION            0x01040000
+#define SHS_OTA_FILE_VERSION            0x01040100
 #define SHS_OTA_MANUFACTURER_CODE       0x131B      /* Espressif (esp-zigbee-sdk default) */
 #define SHS_OTA_IMAGE_TYPE              0x5303      /* This fork, LD2410 build. 0x5301 is upstream (notownblues), 0x5302 the LD2412 build: distinct so no OTA index can cross-flash */
 #define SHS_OTA_HW_VERSION              0x0001
