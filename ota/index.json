@@ -1,0 +1,17 @@
+[
+  {
+    "fileName": "SHS_Z2M_Presence_v1.3.1.ota",
+    "url": "https://github.com/notownblues/SHS-Z2M-Presence/releases/download/v1.3.1/SHS_Z2M_Presence_v1.3.1.ota",
+    "fileVersion": 16974080,
+    "fileSize": 706606,
+    "manufacturerCode": 4891,
+    "imageType": 21249,
+    "sha512": "3c0a8e402670ed09e8708b955f9742ba018550758ac93ab7049617ca1e20f6a1856cc83db39bff7754b7e0832f60b56e113e4519a02c89cc47832d80897eb380",
+    "otaHeaderString": "SHS-Z2M-Presence v1.3.1",
+    "modelId": "SHS-Z2M-Presence",
+    "manufacturerName": [
+      "SmartHomeScene"
+    ],
+    "releaseNotes": "Fix Occupancy LD2410 getting stuck Off while Moving/Static target are On"
+  }
+]

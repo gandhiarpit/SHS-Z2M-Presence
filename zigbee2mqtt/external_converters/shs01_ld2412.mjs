@@ -13,6 +13,10 @@
  * - For zone configuration in web app
  * - Disable when not configuring to reduce Zigbee traffic
  *
+ * OTA Updates (firmware v1.2.0+):
+ * - Set ota.zigbee_ota_override_index_location in configuration.yaml (see README)
+ * - Re-interview the device once after flashing v1.2.0 so Z2M sees the OTA cluster
+ *
  * Place this file in: zigbee2mqtt/data/external_converters/shs01_enhanced.mjs
  */
 
@@ -104,6 +108,16 @@ const ATTR_ZONE3_TYPE_CFG = 0x0046;
 const ATTR_ZONE4_TYPE_CFG = 0x0056;
 const ATTR_ZONE5_TYPE_CFG = 0x0066;
 
+// Room boundary: polygon in sensor coordinates, targets outside are ignored
+const ATTR_BOUNDARY_COUNT_CFG = 0x0070;  // uint8, 0-8 points (< 3 = no boundary)
+const ATTR_BOUNDARY_FIRST_CFG = 0x0071;  // int16 x0, y0, x1, y1, ... x7, y7 (0x0071-0x0080)
+const BOUNDARY_MAX_POINTS = 8;
+// Zone polygons (firmware v1.3.0+): zone N block at 0x0100 + (N-1) * 0x20;
+// +0 = point count (uint8, < 3 = use the zone rectangle), +1..+16 = int16 x0, y0, ... x7, y7
+const ATTR_ZONE_POLY_BASE_CFG = 0x0100;
+const ATTR_ZONE_POLY_STRIDE = 0x20;
+const ZONE_POLY_MAX_POINTS = 8;
+
 // Zone 4 configuration attributes
 const ATTR_ZONE4_ENABLED = 0x0050;
 const ATTR_ZONE4_X1_CFG = 0x0051;
@@ -185,10 +199,25 @@ const definition = {
         {modelID: 'SHS-Z2M-Presence-2412', manufacturerName: 'SmartHomeScene'},
         {
             type: 'router',
+            modelID: 'SHS-Z2M-Presence-2412',
             manufacturerName: 'SmartHomeScene',
             endpoints: [
                 {ID: 1, profileID: 0x0104, deviceID: 0x0100,
                  inputClusters: [0x0000, 0x0003, 0x0006, 0xFDCD], outputClusters: []},
+                {ID: 2, profileID: 0x0104, deviceID: 0x0107,
+                 inputClusters: [0x0406], outputClusters: []},
+                {ID: 4, profileID: 0x0104, deviceID: 0x000C,
+                 inputClusters: [0x0000, 0x000C], outputClusters: []},
+            ],
+        },
+        // v1.2.0+: OTA Upgrade client (0x0019) on EP1
+        {
+            type: 'router',
+            modelID: 'SHS-Z2M-Presence-2412',
+            manufacturerName: 'SmartHomeScene',
+            endpoints: [
+                {ID: 1, profileID: 0x0104, deviceID: 0x0100,
+                 inputClusters: [0x0000, 0x0003, 0x0006, 0xFDCD], outputClusters: [0x0019]},
                 {ID: 2, profileID: 0x0104, deviceID: 0x0107,
                  inputClusters: [0x0406], outputClusters: []},
                 {ID: 4, profileID: 0x0104, deviceID: 0x000C,
@@ -562,6 +591,66 @@ const definition = {
                     }
                 }
 
+                // Room boundary: array of up to 8 {x, y} points (sensor coordinates, mm).
+                // Fewer than 3 points disables it. Points are written before the count;
+                // the firmware applies the whole configuration after a short debounce.
+                if (Array.isArray(value.boundary)) {
+                    const points = value.boundary.slice(0, BOUNDARY_MAX_POINTS);
+                    const count = points.length >= 3 ? points.length : 0;
+                    const toInt16 = (v) => Math.max(-32768, Math.min(32767, Math.round(Number(v) || 0)));
+                    for (let i = 0; i < count; i++) {
+                        const coords = [toInt16(points[i].x), toInt16(points[i].y)];
+                        for (let c = 0; c < 2; c++) {
+                            const attrId = ATTR_BOUNDARY_FIRST_CFG + i * 2 + c;
+                            try {
+                                await endpoint.write(CLUSTER_CONFIG, {[attrId]: {value: coords[c], type: 0x29}});
+                            } catch (e) {
+                                console.log(`SHS01 ZONE: Failed to write boundary point ${i}:`, e.message);
+                            }
+                        }
+                    }
+                    try {
+                        await endpoint.write(CLUSTER_CONFIG, {[ATTR_BOUNDARY_COUNT_CFG]: {value: count, type: 0x20}});
+                        console.log(`SHS01 ZONE: Written boundary (${count} points)`);
+                    } catch (e) {
+                        console.log(`SHS01 ZONE: Failed to write boundary count:`, e.message);
+                    }
+                }
+
+                // Zone polygons: zoneN_polygon = array of up to 8 {x, y} points (sensor coordinates, mm).
+                // Used by the firmware instead of the zone rectangle; [] clears it. Each zone is sent
+                // as one multi-attribute write, falling back to single writes if the device rejects it.
+                // Firmware older than v1.3.0 rejects these attributes and keeps using the rectangle.
+                for (let z = 1; z <= 5; z++) {
+                    const polygon = value[`zone${z}_polygon`];
+                    if (!Array.isArray(polygon)) continue;
+                    const points = polygon.slice(0, ZONE_POLY_MAX_POINTS);
+                    const count = points.length >= 3 ? points.length : 0;
+                    const toInt16 = (v) => Math.max(-32768, Math.min(32767, Math.round(Number(v) || 0)));
+                    const base = ATTR_ZONE_POLY_BASE_CFG + (z - 1) * ATTR_ZONE_POLY_STRIDE;
+                    const attrs = {};
+                    for (let i = 0; i < count; i++) {
+                        attrs[base + 1 + i * 2] = {value: toInt16(points[i].x), type: 0x29};
+                        attrs[base + 2 + i * 2] = {value: toInt16(points[i].y), type: 0x29};
+                    }
+                    attrs[base] = {value: count, type: 0x20};
+                    try {
+                        await endpoint.write(CLUSTER_CONFIG, attrs);
+                        console.log(`SHS01 ZONE: Written zone${z}_polygon (${count} points)`);
+                    } catch (e) {
+                        console.log(`SHS01 ZONE: Batched zone${z}_polygon write failed (${e.message}), writing one by one`);
+                        // Count last, so the firmware never sees a count with missing points
+                        const ids = Object.keys(attrs).map(Number).filter((id) => id !== base).concat(base);
+                        for (const id of ids) {
+                            try {
+                                await endpoint.write(CLUSTER_CONFIG, {[id]: attrs[id]});
+                            } catch (err) {
+                                console.log(`SHS01 ZONE: Failed to write zone${z}_polygon attribute 0x${id.toString(16)}:`, err.message);
+                            }
+                        }
+                    }
+                }
+
                 // Update local zone config for JS-side tracking
                 if (value.zone1_enabled !== undefined) zoneConfig.zone1.enabled = value.zone1_enabled;
                 if (value.zone1_x1 !== undefined) zoneConfig.zone1.x1 = value.zone1_x1;
@@ -770,6 +859,9 @@ const definition = {
     meta: {
         multiEndpoint: true,
     },
+
+    // Firmware v1.2.0+ updates over Zigbee - requires the OTA index in configuration.yaml (see README)
+    ota: true,
 
     endpoint: (device) => {
         return {

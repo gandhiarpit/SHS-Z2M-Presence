@@ -77,8 +77,17 @@
 /* ZCL character strings: leading byte is the length. Kept as two adjacent
  * literals because a hex escape swallows any hex digits that follow it -
  * "\x0a2026-09-09" would parse as one out-of-range escape, not \n + "2026...". */
-#define SHS_BASIC_DATE_CODE             "\x0a" "2026-09-23"
-#define SHS_BASIC_SW_BUILD_ID           "\x06" "v2.0.0"
+#define SHS_BASIC_DATE_CODE             "\x0a" "2026-10-07"
+#define SHS_BASIC_SW_BUILD_ID           "\x06" "v2.1.0"
+
+/* Zigbee OTA (client on EP1). File version format: 0xMMmmpp00 - must match
+ * SHS_BASIC_SW_BUILD_ID (tools/make_release.py checks this) and increase every release. */
+#define SHS_OTA_FILE_VERSION            0x02010000
+#define SHS_OTA_MANUFACTURER_CODE       0x131B      /* Espressif (esp-zigbee-sdk default) */
+#define SHS_OTA_IMAGE_TYPE              0x5302      /* LD2412 build; 0x5301 is the LD2410 build - never share, or OTA cross-flashes the radar */
+#define SHS_OTA_HW_VERSION              0x0001
+#define SHS_OTA_MAX_DATA_SIZE           223
+#define SHS_OTA_ROLLBACK_CONFIRM_MS     (10 * 60 * 1000)  /* Roll back if not rejoined within 10 min of an OTA boot */
 
 /* ============================================================================
  * CLUSTER IDS
@@ -149,6 +158,20 @@
 #define SHS_ATTR_ZONE5_Y2_CFG           0x0064  /* int16, mm */
 #define SHS_ATTR_ZONE5_TARGETS_CFG      0x0065  /* uint8, 0-3, read-only */
 #define SHS_ATTR_ZONE5_TYPE_CFG         0x0066  /* uint8: per-zone type (0=off, 1=detection, 2=filter, 3=interference) */
+
+/* Room boundary (on Config cluster 0xFDCD): polygon in sensor coordinates.
+ * Targets outside it are ignored for occupancy. Point count < 3 = no boundary. */
+#define SHS_ATTR_BOUNDARY_COUNT_CFG     0x0070  /* uint8, 0-8 points */
+#define SHS_ATTR_BOUNDARY_FIRST_CFG     0x0071  /* int16 mm: x0, y0, x1, y1, ... x7, y7 */
+#define SHS_ATTR_BOUNDARY_LAST_CFG      0x0080  /* (16 attributes, 0x0071-0x0080) */
+
+/* Zone polygons (on Config cluster 0xFDCD): optional shape per zone, sensor coordinates.
+ * When the point count is 3 or more the polygon is used instead of the zone rectangle.
+ * Zone N (1-5) block: base = 0x0100 + (N-1) * 0x20; +0 = point count (uint8, 0-8),
+ * +1..+16 = int16 mm x0, y0, x1, y1, ... x7, y7. Zone 1: 0x0100-0x0110, zone 5: 0x0180-0x0190. */
+#define SHS_ATTR_ZONE_POLY_BASE_CFG     0x0100
+#define SHS_ATTR_ZONE_POLY_STRIDE       0x0020
+#define SHS_ATTR_ZONE_POLY_LAST_CFG     0x0190
 
 /* ============================================================================
  * OCCUPANCY CLUSTER CUSTOM ATTRIBUTES (on EP2)

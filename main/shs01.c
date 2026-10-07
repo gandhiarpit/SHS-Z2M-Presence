@@ -25,6 +25,7 @@
 #include "freertos/queue.h"
 #include "driver/gpio.h"
 #include "esp_timer.h"
+#include "esp_ota_ops.h"
 
 #include "shs01.h"
 #include "ld2412_enhanced.h"
@@ -93,6 +94,11 @@ static SemaphoreHandle_t target_data_mutex = NULL;
 #define SHS_NVS_KEY_Z5_X2       "z5_x2"
 #define SHS_NVS_KEY_Z5_Y2       "z5_y2"
 #define SHS_NVS_KEY_Z5_TYPE     "z5_type"
+#define SHS_NVS_KEY_BND_COUNT   "bnd_n"
+#define SHS_NVS_KEY_BND_XY      "bnd_xy"
+/* Zone polygons: "z<N>_pn" (u8 point count) and "z<N>_pxy" (blob), N = 1-5 */
+#define SHS_NVS_KEY_ZPOLY_N_FMT   "z%d_pn"
+#define SHS_NVS_KEY_ZPOLY_XY_FMT  "z%d_pxy"
 
 /* ============================================================================
  * CONFIGURATION STORAGE
@@ -138,8 +144,10 @@ static volatile bool shs_zb_ready = false;
 static volatile bool shs_zb_connected = false;
 static volatile bool shs_zb_rejoin_pending = false;  /* Prevents multiple concurrent rejoin attempts */
 static uint32_t shs_last_successful_tx = 0;
+static volatile bool shs_ota_active = false;  /* OTA download in progress - suppresses rejoin logic */
 #define SHS_ZB_LOCK_TIMEOUT_MS     100    /* Timeout for Zigbee lock acquisition */
 #define SHS_ZB_CONNECTIVITY_CHECK_MS  60000  /* Check connectivity every 60s */
+#define SHS_LD2410_RESYNC_MS          60000  /* Re-report LD2410 occupancy/moving/static every 60s */
 
 /* Diagnostic counters for lock acquisition */
 static uint32_t shs_lock_success_count = 0;
@@ -235,6 +243,22 @@ static int16_t shs_zone4_x2 = 1500, shs_zone4_y2 = 3000;
 static bool    shs_zone5_enabled = false;
 static int16_t shs_zone5_x1 = -1500, shs_zone5_y1 = 0;
 static int16_t shs_zone5_x2 = 1500, shs_zone5_y2 = 3000;
+
+/* Room boundary polygon (sensor coordinates, mm). Targets outside it are ignored
+ * for occupancy. Fewer than 3 points = no boundary (all targets count). */
+static uint8_t shs_boundary_count = 0;
+static int16_t shs_boundary_xy[LD2450_MAX_BOUNDARY_POINTS * 2] = {0};
+_Static_assert(SHS_ATTR_BOUNDARY_LAST_CFG - SHS_ATTR_BOUNDARY_FIRST_CFG + 1 == LD2450_MAX_BOUNDARY_POINTS * 2,
+               "Boundary attribute range must match the boundary coordinate array");
+
+/* Zone polygons (sensor coordinates, mm). Fewer than 3 points = use the zone rectangle. */
+static uint8_t shs_zone_poly_n[LD2450_MAX_ZONES] = {0};
+static int16_t shs_zone_poly_xy[LD2450_MAX_ZONES][LD2450_MAX_ZONE_POINTS * 2] = {{0}};
+_Static_assert(SHS_ATTR_ZONE_POLY_STRIDE >= 1 + LD2450_MAX_ZONE_POINTS * 2,
+               "Zone polygon attribute block must hold the count and all coordinates");
+_Static_assert(SHS_ATTR_ZONE_POLY_LAST_CFG ==
+               SHS_ATTR_ZONE_POLY_BASE_CFG + (LD2450_MAX_ZONES - 1) * SHS_ATTR_ZONE_POLY_STRIDE + LD2450_MAX_ZONE_POINTS * 2,
+               "Zone polygon attribute range must match the zone polygon arrays");
 
 /* Zone config debounce - wait for all attributes to arrive before applying */
 #define SHS_ZONE_CFG_DEBOUNCE_MS  500  /* Wait 500ms after last attribute before applying */
@@ -409,6 +433,17 @@ static void shs_zone_cfg_save_to_nvs(void) {
     nvs_set_i16(h, SHS_NVS_KEY_Z5_X2, shs_zone5_x2);
     nvs_set_i16(h, SHS_NVS_KEY_Z5_Y2, shs_zone5_y2);
     nvs_set_u8(h, SHS_NVS_KEY_Z5_TYPE, shs_zone5_type);
+    /* Room boundary */
+    nvs_set_u8(h, SHS_NVS_KEY_BND_COUNT, shs_boundary_count);
+    nvs_set_blob(h, SHS_NVS_KEY_BND_XY, shs_boundary_xy, sizeof(shs_boundary_xy));
+    /* Zone polygons */
+    for (int z = 0; z < LD2450_MAX_ZONES; z++) {
+        char key[16];
+        snprintf(key, sizeof(key), SHS_NVS_KEY_ZPOLY_N_FMT, z + 1);
+        nvs_set_u8(h, key, shs_zone_poly_n[z]);
+        snprintf(key, sizeof(key), SHS_NVS_KEY_ZPOLY_XY_FMT, z + 1);
+        nvs_set_blob(h, key, shs_zone_poly_xy[z], sizeof(shs_zone_poly_xy[z]));
+    }
 
     nvs_commit(h);
     nvs_close(h);
@@ -499,11 +534,36 @@ static void shs_zone_cfg_load_from_nvs(void) {
     if (nvs_get_u8(h, SHS_NVS_KEY_Z5_TYPE, &u8tmp) == ESP_OK)
         shs_zone5_type = u8tmp;
 
+    /* Room boundary */
+    size_t bnd_len = sizeof(shs_boundary_xy);
+    if (nvs_get_u8(h, SHS_NVS_KEY_BND_COUNT, &u8tmp) == ESP_OK &&
+        nvs_get_blob(h, SHS_NVS_KEY_BND_XY, shs_boundary_xy, &bnd_len) == ESP_OK &&
+        bnd_len == sizeof(shs_boundary_xy)) {
+        shs_boundary_count = (u8tmp > LD2450_MAX_BOUNDARY_POINTS) ? LD2450_MAX_BOUNDARY_POINTS : u8tmp;
+    } else {
+        shs_boundary_count = 0;
+    }
+
+    /* Zone polygons (missing or wrong size = no polygon, use the rectangle) */
+    for (int z = 0; z < LD2450_MAX_ZONES; z++) {
+        char key_n[16], key_xy[16];
+        snprintf(key_n, sizeof(key_n), SHS_NVS_KEY_ZPOLY_N_FMT, z + 1);
+        snprintf(key_xy, sizeof(key_xy), SHS_NVS_KEY_ZPOLY_XY_FMT, z + 1);
+        size_t poly_len = sizeof(shs_zone_poly_xy[z]);
+        if (nvs_get_u8(h, key_n, &u8tmp) == ESP_OK &&
+            nvs_get_blob(h, key_xy, shs_zone_poly_xy[z], &poly_len) == ESP_OK &&
+            poly_len == sizeof(shs_zone_poly_xy[z])) {
+            shs_zone_poly_n[z] = (u8tmp > LD2450_MAX_ZONE_POINTS) ? LD2450_MAX_ZONE_POINTS : u8tmp;
+        } else {
+            shs_zone_poly_n[z] = 0;
+        }
+    }
+
     nvs_close(h);
 
-    ESP_LOGI(SHS_TAG, "Zone config loaded: type=%d, z1=%d, z2=%d, z3=%d, z4=%d, z5=%d",
+    ESP_LOGI(SHS_TAG, "Zone config loaded: type=%d, z1=%d, z2=%d, z3=%d, z4=%d, z5=%d, boundary=%d pts",
              shs_zone_type, shs_zone1_enabled, shs_zone2_enabled, shs_zone3_enabled,
-             shs_zone4_enabled, shs_zone5_enabled);
+             shs_zone4_enabled, shs_zone5_enabled, shs_boundary_count);
 }
 
 /* Forward declaration for zone config apply */
@@ -591,7 +651,22 @@ static void shs_zone_cfg_apply_to_sensor(void) {
         ld2450_clear_zone(4);
     }
 
-    /* Apply zones to sensor (sends command to LD2450) */
+    /* Zone polygons (used instead of the rectangle when set) */
+    for (int z = 0; z < LD2450_MAX_ZONES; z++) {
+        ld2450_set_zone_polygon(z, shs_zone_poly_xy[z], shs_zone_poly_n[z]);
+        for (int i = 0; i < shs_zone_poly_n[z] && i < LD2450_MAX_ZONE_POINTS; i++) {
+            ESP_LOGI(SHS_TAG, "Zone %d polygon point %d: (%d,%d)", z + 1, i,
+                     shs_zone_poly_xy[z][i * 2], shs_zone_poly_xy[z][i * 2 + 1]);
+        }
+    }
+
+    /* Room boundary (targets outside it are ignored for occupancy) */
+    ld2450_set_boundary(shs_boundary_xy, shs_boundary_count);
+    for (int i = 0; i < shs_boundary_count && i < LD2450_MAX_BOUNDARY_POINTS; i++) {
+        ESP_LOGI(SHS_TAG, "Boundary point %d: (%d,%d)", i, shs_boundary_xy[i * 2], shs_boundary_xy[i * 2 + 1]);
+    }
+
+    /* Re-evaluate zone occupancy with the new configuration */
     ld2450_apply_zones();
 
     /* Save zone config to NVS only if changed via Zigbee (not on startup) */
@@ -631,12 +706,14 @@ static bool shs_zb_set_occ_bitmap(uint8_t endpoint, bool occupied) {
     return true;
 }
 
-static void shs_zb_set_bool_attr(uint8_t endpoint, uint16_t cluster, uint16_t attr_id, bool value) {
-    if (!shs_zb_ready) return;
+/* Set bool attribute - returns true if successful, false if Zigbee not ready or lock failed */
+static bool shs_zb_set_bool_attr(uint8_t endpoint, uint16_t cluster, uint16_t attr_id, bool value) {
+    if (!shs_zb_ready) return false;
     bool v = value;
-    SHS_ZB_LOCK_ACQUIRE_OR_RETURN();
+    SHS_ZB_LOCK_ACQUIRE_OR_RETURN_FALSE();
     esp_zb_zcl_set_attribute_val(endpoint, cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, attr_id, &v, false);
     esp_zb_lock_release();
+    return true;
 }
 
 /* Explicit attribute report sender - sends report directly to coordinator */
@@ -750,19 +827,25 @@ static void shs_on_state_change(const ld2412_state_t *state) {
         }
     }
 
+    /* Only update local state if the Zigbee write succeeds - otherwise a lock timeout
+     * leaves the attribute stale and the change is never retried. The driver calls
+     * this callback at least once per second, so a failed write retries promptly. */
     if (report_moving != shs_moving_state) {
-        shs_moving_state = report_moving;
-        if (shs_moving_state) {
-            /* Log the values that passed the filter for debugging false positives */
-            ESP_LOGI(SHS_TAG, "Moving Target -> DETECTED (dist=%dcm, energy=%d)",
-                     state->target.moving_distance, state->target.moving_energy);
-        } else {
-            ESP_LOGI(SHS_TAG, "Moving Target -> CLEAR");
+        if (shs_zb_set_bool_attr(SHS_EP_OCC, ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
+                                 SHS_ATTR_OCC_MOVING_TARGET, report_moving)) {
+            shs_moving_state = report_moving;
+            shs_zb_report_attr(SHS_EP_OCC, ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
+                               SHS_ATTR_OCC_MOVING_TARGET, false);
+            if (shs_moving_state) {
+                /* Log the values that passed the filter for debugging false positives */
+                ESP_LOGI(SHS_TAG, "Moving Target -> DETECTED (dist=%dcm, energy=%d)",
+                         state->target.moving_distance, state->target.moving_energy);
+            } else {
+                ESP_LOGI(SHS_TAG, "Moving Target -> CLEAR");
+            }
+        } else if (shs_zb_ready) {
+            ESP_LOGW(SHS_TAG, "Moving Target report FAILED - will retry");
         }
-        shs_zb_set_bool_attr(SHS_EP_OCC, ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
-                            SHS_ATTR_OCC_MOVING_TARGET, shs_moving_state);
-        shs_zb_report_attr(SHS_EP_OCC, ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
-                           SHS_ATTR_OCC_MOVING_TARGET, false);
     }
 
     /* STATIC TARGET with cooldown (uses occupancy_clear_sec) */
@@ -781,29 +864,51 @@ static void shs_on_state_change(const ld2412_state_t *state) {
     }
 
     if (report_static != shs_static_state) {
-        shs_static_state = report_static;
-        if (shs_static_state) {
-            /* Log the values that passed the filter for debugging false positives */
-            ESP_LOGI(SHS_TAG, "Static Target -> DETECTED (dist=%dcm, energy=%d)",
-                     state->target.static_distance, state->target.static_energy);
-        } else {
-            ESP_LOGI(SHS_TAG, "Static Target -> CLEAR");
+        if (shs_zb_set_bool_attr(SHS_EP_OCC, ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
+                                 SHS_ATTR_OCC_STATIC_TARGET, report_static)) {
+            shs_static_state = report_static;
+            shs_zb_report_attr(SHS_EP_OCC, ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
+                               SHS_ATTR_OCC_STATIC_TARGET, false);
+            if (shs_static_state) {
+                /* Log the values that passed the filter for debugging false positives */
+                ESP_LOGI(SHS_TAG, "Static Target -> DETECTED (dist=%dcm, energy=%d)",
+                         state->target.static_distance, state->target.static_energy);
+            } else {
+                ESP_LOGI(SHS_TAG, "Static Target -> CLEAR");
+            }
+        } else if (shs_zb_ready) {
+            ESP_LOGW(SHS_TAG, "Static Target report FAILED - will retry");
         }
-        shs_zb_set_bool_attr(SHS_EP_OCC, ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
-                            SHS_ATTR_OCC_STATIC_TARGET, shs_static_state);
-        shs_zb_report_attr(SHS_EP_OCC, ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
-                           SHS_ATTR_OCC_STATIC_TARGET, false);
     }
 
     /* OCCUPANCY = presence with cooldowns applied */
     bool presence = report_moving || report_static;
 
     if (presence != shs_occupancy_state) {
-        shs_occupancy_state = presence;
-        ESP_LOGI(SHS_TAG, "Occupancy -> %s", presence ? "DETECTED" : "CLEAR");
-        shs_zb_set_occ_bitmap(SHS_EP_OCC, presence);
+        if (shs_zb_set_occ_bitmap(SHS_EP_OCC, presence)) {
+            shs_occupancy_state = presence;
+            shs_zb_report_attr(SHS_EP_OCC, ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
+                               ESP_ZB_ZCL_ATTR_OCCUPANCY_SENSING_OCCUPANCY_ID, false);
+            ESP_LOGI(SHS_TAG, "Occupancy -> %s", presence ? "DETECTED" : "CLEAR");
+        } else if (shs_zb_ready) {
+            ESP_LOGW(SHS_TAG, "Occupancy report FAILED - will retry");
+        }
+    }
+
+    /* Periodic resync: explicitly re-report the EP2 states so a report lost over the
+     * air can't leave Z2M/HA out of sync until the 1h max reporting interval. */
+    static uint32_t last_resync_ms = 0;
+    if (shs_zb_ready && shs_zb_connected && !shs_zb_rejoin_pending &&
+        (now_ms - last_resync_ms) >= SHS_LD2410_RESYNC_MS) {
+        last_resync_ms = now_ms;
         shs_zb_report_attr(SHS_EP_OCC, ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
                            ESP_ZB_ZCL_ATTR_OCCUPANCY_SENSING_OCCUPANCY_ID, false);
+        shs_zb_report_attr(SHS_EP_OCC, ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
+                           SHS_ATTR_OCC_MOVING_TARGET, false);
+        shs_zb_report_attr(SHS_EP_OCC, ESP_ZB_ZCL_CLUSTER_ID_OCCUPANCY_SENSING,
+                           SHS_ATTR_OCC_STATIC_TARGET, false);
+        ESP_LOGD(SHS_TAG, "LD2410 resync sent (occ=%d moving=%d static=%d)",
+                 shs_occupancy_state, shs_moving_state, shs_static_state);
     }
 }
 
@@ -1005,48 +1110,81 @@ static bool is_valid_target(const ld2450_target_t *target) {
     return true;
 }
 
-/* Check if a point is within a rectangular zone */
-static bool shs_point_in_zone(int16_t x, int16_t y, int16_t x1, int16_t y1, int16_t x2, int16_t y2) {
-    int16_t min_x = (x1 < x2) ? x1 : x2;
-    int16_t max_x = (x1 > x2) ? x1 : x2;
-    int16_t min_y = (y1 < y2) ? y1 : y2;
-    int16_t max_y = (y1 > y2) ? y1 : y2;
+/* Zone settings needed for target checks, in zone order */
+typedef struct {
+    bool enabled;
+    uint8_t type;
+    int16_t x1, y1, x2, y2;
+    uint8_t poly_n;
+    const int16_t *poly_xy;
+} shs_zone_view_t;
+
+static void shs_get_zone_views(shs_zone_view_t views[LD2450_MAX_ZONES]) {
+    const shs_zone_view_t zones[LD2450_MAX_ZONES] = {
+        {shs_zone1_enabled, shs_zone1_type, shs_zone1_x1, shs_zone1_y1, shs_zone1_x2, shs_zone1_y2, shs_zone_poly_n[0], shs_zone_poly_xy[0]},
+        {shs_zone2_enabled, shs_zone2_type, shs_zone2_x1, shs_zone2_y1, shs_zone2_x2, shs_zone2_y2, shs_zone_poly_n[1], shs_zone_poly_xy[1]},
+        {shs_zone3_enabled, shs_zone3_type, shs_zone3_x1, shs_zone3_y1, shs_zone3_x2, shs_zone3_y2, shs_zone_poly_n[2], shs_zone_poly_xy[2]},
+        {shs_zone4_enabled, shs_zone4_type, shs_zone4_x1, shs_zone4_y1, shs_zone4_x2, shs_zone4_y2, shs_zone_poly_n[3], shs_zone_poly_xy[3]},
+        {shs_zone5_enabled, shs_zone5_type, shs_zone5_x1, shs_zone5_y1, shs_zone5_x2, shs_zone5_y2, shs_zone_poly_n[4], shs_zone_poly_xy[4]},
+    };
+    memcpy(views, zones, sizeof(zones));
+}
+
+/* Check if a point is within a zone: its polygon if set, otherwise its rectangle */
+static bool shs_point_in_zone(int16_t x, int16_t y, const shs_zone_view_t *zone) {
+    if (zone->poly_n >= 3) {
+        return ld2450_point_in_polygon(x, y, zone->poly_xy, zone->poly_n);
+    }
+    int16_t min_x = (zone->x1 < zone->x2) ? zone->x1 : zone->x2;
+    int16_t max_x = (zone->x1 > zone->x2) ? zone->x1 : zone->x2;
+    int16_t min_y = (zone->y1 < zone->y2) ? zone->y1 : zone->y2;
+    int16_t max_y = (zone->y1 > zone->y2) ? zone->y1 : zone->y2;
     return (x >= min_x && x <= max_x && y >= min_y && y <= max_y);
 }
 
 /* Check if a target is in any enabled interference zone */
 static bool shs_target_in_interference_zone(int16_t x, int16_t y) {
-    /* Check zone 1 */
-    if (shs_zone1_enabled && shs_zone1_type == LD2450_ZONE_INTERFERENCE) {
-        if (shs_point_in_zone(x, y, shs_zone1_x1, shs_zone1_y1, shs_zone1_x2, shs_zone1_y2)) {
-            return true;
-        }
-    }
-    /* Check zone 2 */
-    if (shs_zone2_enabled && shs_zone2_type == LD2450_ZONE_INTERFERENCE) {
-        if (shs_point_in_zone(x, y, shs_zone2_x1, shs_zone2_y1, shs_zone2_x2, shs_zone2_y2)) {
-            return true;
-        }
-    }
-    /* Check zone 3 */
-    if (shs_zone3_enabled && shs_zone3_type == LD2450_ZONE_INTERFERENCE) {
-        if (shs_point_in_zone(x, y, shs_zone3_x1, shs_zone3_y1, shs_zone3_x2, shs_zone3_y2)) {
-            return true;
-        }
-    }
-    /* Check zone 4 */
-    if (shs_zone4_enabled && shs_zone4_type == LD2450_ZONE_INTERFERENCE) {
-        if (shs_point_in_zone(x, y, shs_zone4_x1, shs_zone4_y1, shs_zone4_x2, shs_zone4_y2)) {
-            return true;
-        }
-    }
-    /* Check zone 5 */
-    if (shs_zone5_enabled && shs_zone5_type == LD2450_ZONE_INTERFERENCE) {
-        if (shs_point_in_zone(x, y, shs_zone5_x1, shs_zone5_y1, shs_zone5_x2, shs_zone5_y2)) {
+    shs_zone_view_t zones[LD2450_MAX_ZONES];
+    shs_get_zone_views(zones);
+    for (size_t i = 0; i < LD2450_MAX_ZONES; i++) {
+        if (zones[i].enabled && zones[i].type == LD2450_ZONE_INTERFERENCE &&
+            shs_point_in_zone(x, y, &zones[i])) {
             return true;
         }
     }
     return false;
+}
+
+/* Check if a target is in any enabled non-interference zone. These zones take part in
+ * the global zone mode (Include/Exclude). any_zone reports whether any such zone exists. */
+static bool shs_target_in_mode_zone(int16_t x, int16_t y, bool *any_zone) {
+    shs_zone_view_t zones[LD2450_MAX_ZONES];
+    shs_get_zone_views(zones);
+    bool inside = false;
+    *any_zone = false;
+    for (size_t i = 0; i < LD2450_MAX_ZONES; i++) {
+        if (!zones[i].enabled || zones[i].type == LD2450_ZONE_INTERFERENCE) continue;
+        *any_zone = true;
+        if (shs_point_in_zone(x, y, &zones[i])) {
+            inside = true;
+        }
+    }
+    return inside;
+}
+
+/* Apply the global zone mode to a target: Off = all count, Include = only targets inside
+ * a zone, Exclude = only targets outside all zones. Interference zones are handled
+ * separately and don't take part. With no Include/Exclude zones, every target counts. */
+static bool shs_target_passes_zone_mode(int16_t x, int16_t y) {
+    bool any_zone = false;
+    bool in_zone = shs_target_in_mode_zone(x, y, &any_zone);
+    if (!any_zone) return true;
+
+    switch (shs_zone_type) {
+        case LD2450_ZONE_DETECTION: return in_zone;
+        case LD2450_ZONE_FILTER:    return !in_zone;
+        default:                    return true;
+    }
 }
 
 static void shs_on_ld2450_target_update(const ld2450_target_t *targets, uint8_t active_count) {
@@ -1054,8 +1192,13 @@ static void shs_on_ld2450_target_update(const ld2450_target_t *targets, uint8_t 
     uint8_t effective_count = 0;
     for (int i = 0; i < 3; i++) {
         if (is_valid_target(&targets[i]) && targets[i].active) {
-            /* Check if target is in any interference zone */
-            if (!shs_target_in_interference_zone(targets[i].x, targets[i].y)) {
+            /* Ignore targets outside the room boundary (e.g. seen through a wall) */
+            if (!ld2450_point_in_boundary(targets[i].x, targets[i].y)) {
+                continue;
+            }
+            /* Ignore targets in interference zones, then apply the zone mode (Include/Exclude) */
+            if (!shs_target_in_interference_zone(targets[i].x, targets[i].y) &&
+                shs_target_passes_zone_mode(targets[i].x, targets[i].y)) {
                 effective_count++;
             }
         }
@@ -1067,7 +1210,7 @@ static void shs_on_ld2450_target_update(const ld2450_target_t *targets, uint8_t 
         if (shs_zb_set_analog_value(SHS_EP_LD2450_TARGET_COUNT, (float)effective_count) &&
             shs_zb_report_analog_attr(SHS_EP_LD2450_TARGET_COUNT)) {
             shs_ld2450_target_count = effective_count;
-            ESP_LOGI(SHS_TAG, "LD2450 target count: %d (raw: %d, filtered: %d in interference)",
+            ESP_LOGI(SHS_TAG, "LD2450 target count: %d (raw: %d, filtered: %d by boundary/interference/zone mode)",
                      effective_count, active_count, active_count - effective_count);
         } else if (shs_zb_ready) {
             ESP_LOGW(SHS_TAG, "LD2450 target count report FAILED - will retry");
@@ -1925,7 +2068,42 @@ static esp_err_t shs_zb_attribute_handler(const esp_zb_zcl_set_attr_value_messag
                 shs_zone_cfg_schedule_apply();
                 return ESP_OK;
 
+            /* Room boundary */
+            case SHS_ATTR_BOUNDARY_COUNT_CFG:
+                shs_boundary_count = (v8 > LD2450_MAX_BOUNDARY_POINTS) ? LD2450_MAX_BOUNDARY_POINTS : v8;
+                ESP_LOGI(SHS_TAG, "Boundary Points = %d", shs_boundary_count);
+                shs_zone_cfg_schedule_apply();
+                return ESP_OK;
+
             default:
+                if (message->attribute.id >= SHS_ATTR_BOUNDARY_FIRST_CFG &&
+                    message->attribute.id <= SHS_ATTR_BOUNDARY_LAST_CFG) {
+                    int idx = message->attribute.id - SHS_ATTR_BOUNDARY_FIRST_CFG;
+                    shs_boundary_xy[idx] = v16s;
+                    ESP_LOGI(SHS_TAG, "Boundary %c%d = %d", (idx % 2) ? 'Y' : 'X', idx / 2, v16s);
+                    shs_zone_cfg_schedule_apply();
+                    return ESP_OK;
+                }
+                /* Zone polygons: per-zone block of point count + x/y pairs */
+                if (message->attribute.id >= SHS_ATTR_ZONE_POLY_BASE_CFG &&
+                    message->attribute.id <= SHS_ATTR_ZONE_POLY_LAST_CFG) {
+                    int rel = message->attribute.id - SHS_ATTR_ZONE_POLY_BASE_CFG;
+                    int zone = rel / SHS_ATTR_ZONE_POLY_STRIDE;
+                    int offset = rel % SHS_ATTR_ZONE_POLY_STRIDE;
+                    if (offset == 0) {
+                        shs_zone_poly_n[zone] = (v8 > LD2450_MAX_ZONE_POINTS) ? LD2450_MAX_ZONE_POINTS : v8;
+                        ESP_LOGI(SHS_TAG, "Zone %d Polygon Points = %d", zone + 1, shs_zone_poly_n[zone]);
+                    } else if (offset <= LD2450_MAX_ZONE_POINTS * 2) {
+                        int idx = offset - 1;
+                        shs_zone_poly_xy[zone][idx] = v16s;
+                        ESP_LOGI(SHS_TAG, "Zone %d Polygon %c%d = %d", zone + 1,
+                                 (idx % 2) ? 'Y' : 'X', idx / 2, v16s);
+                    } else {
+                        break;
+                    }
+                    shs_zone_cfg_schedule_apply();
+                    return ESP_OK;
+                }
                 break;
         }
     }
@@ -1933,11 +2111,229 @@ static esp_err_t shs_zb_attribute_handler(const esp_zb_zcl_set_attr_value_messag
     return ESP_OK;
 }
 
-static esp_err_t shs_zb_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message) {
-    if (callback_id == ESP_ZB_CORE_SET_ATTR_VALUE_CB_ID) {
-        return shs_zb_attribute_handler((const esp_zb_zcl_set_attr_value_message_t *)message);
+/* ============================================================================
+ * OTA UPGRADE (CLIENT)
+ * ============================================================================ */
+
+#define SHS_OTA_ELEMENT_HEADER_LEN   6       /* Sub-element tag: u16 tag id + u32 length */
+#define SHS_OTA_TAG_UPGRADE_IMAGE    0x0000
+
+static const esp_partition_t *shs_ota_partition = NULL;
+static esp_ota_handle_t shs_ota_handle = 0;
+static uint32_t shs_ota_total_size = 0;      /* Image size after the 56-byte OTA file header */
+static uint32_t shs_ota_offset = 0;          /* Bytes received so far (including the tag header) */
+static bool shs_ota_tag_received = false;
+static uint8_t shs_ota_last_pct_logged = 0;
+static esp_timer_handle_t shs_ota_rollback_timer = NULL;
+
+static void shs_ota_reset_state(void) {
+    if (shs_ota_handle) {
+        esp_ota_abort(shs_ota_handle);
+    }
+    shs_ota_handle = 0;
+    shs_ota_partition = NULL;
+    shs_ota_total_size = 0;
+    shs_ota_offset = 0;
+    shs_ota_tag_received = false;
+    shs_ota_last_pct_logged = 0;
+    shs_ota_active = false;
+}
+
+/* Strip the sub-element tag header from the first block(s) and return the firmware bytes */
+static esp_err_t shs_ota_element_data(uint32_t total_size, const void *payload, uint16_t payload_size,
+                                      const void **outbuf, uint16_t *outlen) {
+    if (!shs_ota_tag_received) {
+        if (payload_size <= SHS_OTA_ELEMENT_HEADER_LEN) {
+            ESP_LOGE(SHS_TAG, "OTA: first block too small (%u bytes)", payload_size);
+            return ESP_ERR_INVALID_SIZE;
+        }
+        const uint8_t *p = (const uint8_t *)payload;
+        uint16_t tag_id = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+        uint32_t length = (uint32_t)p[2] | ((uint32_t)p[3] << 8) | ((uint32_t)p[4] << 16) | ((uint32_t)p[5] << 24);
+        if (tag_id != SHS_OTA_TAG_UPGRADE_IMAGE || (length + SHS_OTA_ELEMENT_HEADER_LEN) != total_size) {
+            ESP_LOGE(SHS_TAG, "OTA: bad sub-element (tag 0x%04x, length %lu, image size %lu)",
+                     tag_id, (unsigned long)length, (unsigned long)total_size);
+            return ESP_ERR_INVALID_ARG;
+        }
+        shs_ota_tag_received = true;
+        *outbuf = p + SHS_OTA_ELEMENT_HEADER_LEN;
+        *outlen = payload_size - SHS_OTA_ELEMENT_HEADER_LEN;
+    } else {
+        *outbuf = payload;
+        *outlen = payload_size;
     }
     return ESP_OK;
+}
+
+static esp_err_t shs_zb_ota_upgrade_handler(const esp_zb_zcl_ota_upgrade_value_message_t *message) {
+    esp_err_t ret = ESP_OK;
+
+    if (message->info.status != ESP_ZB_ZCL_STATUS_SUCCESS) {
+        ESP_LOGW(SHS_TAG, "OTA: callback status 0x%x", message->info.status);
+        return ESP_OK;
+    }
+
+    switch (message->upgrade_status) {
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_START:
+        ESP_LOGI(SHS_TAG, "OTA: start - version 0x%08lx, type 0x%04x, manuf 0x%04x, size %lu",
+                 (unsigned long)message->ota_header.file_version, message->ota_header.image_type,
+                 message->ota_header.manufacturer_code, (unsigned long)message->ota_header.image_size);
+        shs_ota_reset_state();
+        shs_ota_partition = esp_ota_get_next_update_partition(NULL);
+        if (shs_ota_partition == NULL) {
+            ESP_LOGE(SHS_TAG, "OTA: no update partition (is the OTA partition table flashed?)");
+            return ESP_FAIL;
+        }
+        ret = esp_ota_begin(shs_ota_partition, OTA_WITH_SEQUENTIAL_WRITES, &shs_ota_handle);
+        if (ret != ESP_OK) {
+            ESP_LOGE(SHS_TAG, "OTA: esp_ota_begin failed (%s)", esp_err_to_name(ret));
+            shs_ota_handle = 0;
+            shs_ota_reset_state();
+            return ret;
+        }
+        shs_ota_active = true;
+        ESP_LOGI(SHS_TAG, "OTA: writing to partition '%s' at 0x%lx",
+                 shs_ota_partition->label, (unsigned long)shs_ota_partition->address);
+        break;
+
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_RECEIVE: {
+        if (!shs_ota_handle) {
+            ESP_LOGE(SHS_TAG, "OTA: data received without an active session");
+            return ESP_FAIL;
+        }
+        shs_ota_total_size = message->ota_header.image_size;
+        shs_ota_offset += message->payload_size;
+        shs_last_successful_tx = (uint32_t)(esp_timer_get_time() / 1000);
+
+        const void *buf = NULL;
+        uint16_t len = 0;
+        ret = shs_ota_element_data(shs_ota_total_size, message->payload, message->payload_size, &buf, &len);
+        if (ret == ESP_OK) {
+            ret = esp_ota_write(shs_ota_handle, buf, len);
+        }
+        if (ret != ESP_OK) {
+            ESP_LOGE(SHS_TAG, "OTA: write failed at offset %lu (%s)",
+                     (unsigned long)shs_ota_offset, esp_err_to_name(ret));
+            shs_ota_reset_state();
+            return ret;
+        }
+
+        uint8_t pct = shs_ota_total_size ? (uint8_t)((uint64_t)shs_ota_offset * 100 / shs_ota_total_size) : 0;
+        if (pct >= shs_ota_last_pct_logged + 10) {
+            shs_ota_last_pct_logged = pct - (pct % 10);
+            ESP_LOGI(SHS_TAG, "OTA: %u%% (%lu / %lu bytes)", pct,
+                     (unsigned long)shs_ota_offset, (unsigned long)shs_ota_total_size);
+        }
+        break;
+    }
+
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_APPLY:
+        ESP_LOGI(SHS_TAG, "OTA: apply");
+        break;
+
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_CHECK:
+        if (shs_ota_offset != shs_ota_total_size || !shs_ota_tag_received) {
+            ESP_LOGE(SHS_TAG, "OTA: size check failed (%lu / %lu bytes)",
+                     (unsigned long)shs_ota_offset, (unsigned long)shs_ota_total_size);
+            shs_ota_reset_state();
+            return ESP_FAIL;
+        }
+        ESP_LOGI(SHS_TAG, "OTA: download complete (%lu bytes)", (unsigned long)shs_ota_total_size);
+        break;
+
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_FINISH:
+        if (!shs_ota_handle) {
+            ESP_LOGE(SHS_TAG, "OTA: finish without an active session");
+            return ESP_FAIL;
+        }
+        ret = esp_ota_end(shs_ota_handle);  /* Validates the app image */
+        shs_ota_handle = 0;
+        if (ret == ESP_OK) {
+            ret = esp_ota_set_boot_partition(shs_ota_partition);
+        }
+        if (ret != ESP_OK) {
+            ESP_LOGE(SHS_TAG, "OTA: image rejected (%s)", esp_err_to_name(ret));
+            shs_ota_reset_state();
+            return ret;
+        }
+        ESP_LOGW(SHS_TAG, "OTA: new firmware 0x%08lx installed - restarting",
+                 (unsigned long)message->ota_header.file_version);
+        esp_restart();
+        break;
+
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_ABORT:
+        ESP_LOGW(SHS_TAG, "OTA: aborted at %lu / %lu bytes",
+                 (unsigned long)shs_ota_offset, (unsigned long)shs_ota_total_size);
+        shs_ota_reset_state();
+        break;
+
+    default:
+        ESP_LOGI(SHS_TAG, "OTA: status %d", message->upgrade_status);
+        break;
+    }
+    return ret;
+}
+
+static esp_err_t shs_zb_ota_query_resp_handler(const esp_zb_zcl_ota_upgrade_query_image_resp_message_t *message) {
+    if (message->info.status != ESP_ZB_ZCL_STATUS_SUCCESS) {
+        ESP_LOGD(SHS_TAG, "OTA: query image response status 0x%x", message->info.status);
+        return ESP_OK;
+    }
+    ESP_LOGI(SHS_TAG, "OTA: server 0x%04x offers version 0x%08lx, type 0x%04x, manuf 0x%04x, size %lu",
+             message->server_addr.u.short_addr, (unsigned long)message->file_version,
+             message->image_type, message->manufacturer_code, (unsigned long)message->image_size);
+    if (message->image_type != SHS_OTA_IMAGE_TYPE || message->manufacturer_code != SHS_OTA_MANUFACTURER_CODE) {
+        ESP_LOGW(SHS_TAG, "OTA: image not for this device - rejected");
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+/* Mark a freshly OTA'd image as good once it is back on the network */
+static void shs_ota_confirm_running_app(void) {
+    if (shs_ota_rollback_timer == NULL) {
+        return;
+    }
+    esp_timer_stop(shs_ota_rollback_timer);
+    esp_timer_delete(shs_ota_rollback_timer);
+    shs_ota_rollback_timer = NULL;
+    esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+    ESP_LOGI(SHS_TAG, "OTA: new firmware confirmed (%s)", esp_err_to_name(err));
+}
+
+static void shs_ota_rollback_timer_cb(void *arg) {
+    ESP_LOGE(SHS_TAG, "OTA: new firmware did not rejoin within %d s - rolling back",
+             SHS_OTA_ROLLBACK_CONFIRM_MS / 1000);
+    esp_ota_mark_app_invalid_rollback_and_reboot();
+}
+
+static void shs_ota_check_pending_verify(void) {
+    esp_ota_img_states_t state;
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (esp_ota_get_state_partition(running, &state) != ESP_OK || state != ESP_OTA_IMG_PENDING_VERIFY) {
+        return;
+    }
+    ESP_LOGW(SHS_TAG, "OTA: running new firmware from '%s' - pending verification", running->label);
+    const esp_timer_create_args_t args = {
+        .callback = shs_ota_rollback_timer_cb,
+        .name = "shs_ota_rollback",
+    };
+    if (esp_timer_create(&args, &shs_ota_rollback_timer) == ESP_OK) {
+        esp_timer_start_once(shs_ota_rollback_timer, (uint64_t)SHS_OTA_ROLLBACK_CONFIRM_MS * 1000);
+    }
+}
+
+static esp_err_t shs_zb_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message) {
+    switch (callback_id) {
+    case ESP_ZB_CORE_SET_ATTR_VALUE_CB_ID:
+        return shs_zb_attribute_handler((const esp_zb_zcl_set_attr_value_message_t *)message);
+    case ESP_ZB_CORE_OTA_UPGRADE_VALUE_CB_ID:
+        return shs_zb_ota_upgrade_handler((const esp_zb_zcl_ota_upgrade_value_message_t *)message);
+    case ESP_ZB_CORE_OTA_UPGRADE_QUERY_IMAGE_RESP_CB_ID:
+        return shs_zb_ota_query_resp_handler((const esp_zb_zcl_ota_upgrade_query_image_resp_message_t *)message);
+    default:
+        return ESP_OK;
+    }
 }
 
 /* ============================================================================
@@ -2244,7 +2640,8 @@ static void shs_ld2450_task(void *pvParameters) {
 
             /* Check if we haven't had a successful TX in a while (3 minutes) */
             /* This should now only trigger if heartbeat also fails */
-            if (time_since_last_tx > 180000 && shs_last_successful_tx > 0 && !shs_zb_rejoin_pending) {
+            if (time_since_last_tx > 180000 && shs_last_successful_tx > 0 && !shs_zb_rejoin_pending &&
+                !shs_ota_active) {
                 ESP_LOGW(SHS_TAG, "Zigbee: No successful TX for %lu ms (even heartbeat failed) - scheduling rejoin",
                          (unsigned long)time_since_last_tx);
                 ESP_LOGW(SHS_TAG, "Zigbee: consecutive lock fails: %lu", (unsigned long)shs_lock_consecutive_fails);
@@ -2458,6 +2855,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct) {
             } else {
                 ESP_LOGI(SHS_TAG, "Device rebooted - already joined network");
                 shs_zb_connected = true;
+                shs_ota_confirm_running_app();
                 /* Device already joined - force update sensor states now */
                 shs_ld2412c_force_update();
                 shs_ld2450_force_update();
@@ -2475,6 +2873,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct) {
                      esp_zb_get_pan_id(), esp_zb_get_current_channel());
             shs_zb_connected = true;
             shs_zb_rejoin_pending = false;  /* Clear rejoin flag on successful join */
+            shs_ota_confirm_running_app();
             shs_last_successful_tx = (uint32_t)(esp_timer_get_time() / 1000);
             /* Device just joined - force update sensor states now */
             shs_ld2412c_force_update();
@@ -2539,6 +2938,48 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct) {
 /* ============================================================================
  * ZIGBEE TASK - ENDPOINT & CLUSTER CREATION
  * ============================================================================ */
+
+/*
+ * Descriptive attributes for genAnalogInput / genBinaryInput.
+ *
+ * Z2M resolves device definitions before external converters are loaded, so at
+ * every startup it auto-generates a definition for this device first. That
+ * generator reads description/applicationType/engineeringUnits/min/max/resolution
+ * from every analog/binary input endpoint unless they are already in its
+ * attribute cache. If they are unsupported, nothing is cached and ~100 reads are
+ * sent on every Z2M start; with the device offline each one waits for
+ * NWK_NO_ROUTE and Z2M startup stalls (GitHub issue #12). Exposing them lets Z2M
+ * cache the values once, so later starts send no reads.
+ */
+#define SHS_AI_APP_TYPE_COUNT       0x000C0000UL  /* Group 0 (AI), type 0x0C = count/unitless */
+#define SHS_BACNET_UNITS_NO_UNITS   95
+
+/* ZCL char strings (length-prefixed), one per endpoint, kept for the lifetime of the stack */
+static char s_zcl_desc[SHS_EP_ZONE5_TARGETS + 1][33];
+
+static char *shs_zcl_desc(uint8_t endpoint, const char *text) {
+    size_t len = strnlen(text, sizeof(s_zcl_desc[0]) - 1);
+    s_zcl_desc[endpoint][0] = (char)len;
+    memcpy(&s_zcl_desc[endpoint][1], text, len);
+    return s_zcl_desc[endpoint];
+}
+
+static void shs_add_analog_input_meta(esp_zb_attribute_list_t *ai, uint8_t endpoint, const char *desc,
+                                      float min_value, float max_value, float resolution) {
+    uint32_t app_type = SHS_AI_APP_TYPE_COUNT;
+    uint16_t units = SHS_BACNET_UNITS_NO_UNITS;
+
+    esp_zb_analog_input_cluster_add_attr(ai, ESP_ZB_ZCL_ATTR_ANALOG_INPUT_DESCRIPTION_ID, shs_zcl_desc(endpoint, desc));
+    esp_zb_analog_input_cluster_add_attr(ai, ESP_ZB_ZCL_ATTR_ANALOG_INPUT_APPLICATION_TYPE_ID, &app_type);
+    esp_zb_analog_input_cluster_add_attr(ai, ESP_ZB_ZCL_ATTR_ANALOG_INPUT_ENGINEERING_UNITS_ID, &units);
+    esp_zb_analog_input_cluster_add_attr(ai, ESP_ZB_ZCL_ATTR_ANALOG_INPUT_MIN_PRESENT_VALUE_ID, &min_value);
+    esp_zb_analog_input_cluster_add_attr(ai, ESP_ZB_ZCL_ATTR_ANALOG_INPUT_MAX_PRESENT_VALUE_ID, &max_value);
+    esp_zb_analog_input_cluster_add_attr(ai, ESP_ZB_ZCL_ATTR_ANALOG_INPUT_RESOLUTION_ID, &resolution);
+}
+
+static void shs_add_binary_input_meta(esp_zb_attribute_list_t *bi, uint8_t endpoint, const char *desc) {
+    esp_zb_binary_input_cluster_add_attr(bi, ESP_ZB_ZCL_ATTR_BINARY_INPUT_DESCRIPTION_ID, shs_zcl_desc(endpoint, desc));
+}
 
 static void shs_zigbee_task(void *pvParameters) {
     esp_zb_cfg_t zb_nwk_cfg = SHS_ZR_CONFIG();
@@ -2680,7 +3121,46 @@ static void shs_zigbee_task(void *pvParameters) {
         esp_zb_custom_cluster_add_custom_attr(cfg_cl, SHS_ATTR_ZONE5_TYPE_CFG,
             ESP_ZB_ZCL_ATTR_TYPE_U8, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, &shs_zone5_type);
 
+        /* Room boundary: point count + 8 x/y pairs */
+        esp_zb_custom_cluster_add_custom_attr(cfg_cl, SHS_ATTR_BOUNDARY_COUNT_CFG,
+            ESP_ZB_ZCL_ATTR_TYPE_U8, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, &shs_boundary_count);
+        for (int i = 0; i < LD2450_MAX_BOUNDARY_POINTS * 2; i++) {
+            esp_zb_custom_cluster_add_custom_attr(cfg_cl, SHS_ATTR_BOUNDARY_FIRST_CFG + i,
+                ESP_ZB_ZCL_ATTR_TYPE_S16, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, &shs_boundary_xy[i]);
+        }
+
+        /* Zone polygons: per zone, point count + 8 x/y pairs */
+        for (int z = 0; z < LD2450_MAX_ZONES; z++) {
+            uint16_t base = SHS_ATTR_ZONE_POLY_BASE_CFG + z * SHS_ATTR_ZONE_POLY_STRIDE;
+            esp_zb_custom_cluster_add_custom_attr(cfg_cl, base,
+                ESP_ZB_ZCL_ATTR_TYPE_U8, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, &shs_zone_poly_n[z]);
+            for (int i = 0; i < LD2450_MAX_ZONE_POINTS * 2; i++) {
+                esp_zb_custom_cluster_add_custom_attr(cfg_cl, base + 1 + i,
+                    ESP_ZB_ZCL_ATTR_TYPE_S16, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, &shs_zone_poly_xy[z][i]);
+            }
+        }
+
         esp_zb_cluster_list_add_custom_cluster(cl, cfg_cl, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+
+        /* OTA Upgrade client - Z2M serves images from its OTA index */
+        esp_zb_ota_cluster_cfg_t ota_cfg = {
+            .ota_upgrade_file_version = SHS_OTA_FILE_VERSION,
+            .ota_upgrade_downloaded_file_ver = SHS_OTA_FILE_VERSION,
+            .ota_upgrade_manufacturer = SHS_OTA_MANUFACTURER_CODE,
+            .ota_upgrade_image_type = SHS_OTA_IMAGE_TYPE,
+        };
+        esp_zb_attribute_list_t *ota_cl = esp_zb_ota_cluster_create(&ota_cfg);
+        esp_zb_zcl_ota_upgrade_client_variable_t ota_client = {
+            .timer_query = ESP_ZB_ZCL_OTA_UPGRADE_QUERY_TIMER_COUNT_DEF,
+            .hw_version = SHS_OTA_HW_VERSION,
+            .max_data_size = SHS_OTA_MAX_DATA_SIZE,
+        };
+        uint16_t ota_server_addr = 0xffff;
+        uint8_t ota_server_ep = 0xff;
+        esp_zb_ota_cluster_add_attr(ota_cl, ESP_ZB_ZCL_ATTR_OTA_UPGRADE_CLIENT_DATA_ID, &ota_client);
+        esp_zb_ota_cluster_add_attr(ota_cl, ESP_ZB_ZCL_ATTR_OTA_UPGRADE_SERVER_ADDR_ID, &ota_server_addr);
+        esp_zb_ota_cluster_add_attr(ota_cl, ESP_ZB_ZCL_ATTR_OTA_UPGRADE_SERVER_ENDPOINT_ID, &ota_server_ep);
+        esp_zb_cluster_list_add_ota_cluster(cl, ota_cl, ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE);
 
         esp_zb_endpoint_config_t ep_cfg = {
             .endpoint = SHS_EP_LIGHT,
@@ -2759,6 +3239,7 @@ static void shs_zigbee_task(void *pvParameters) {
             .status_flags = 0,
         };
         esp_zb_attribute_list_t *analog_input = esp_zb_analog_input_cluster_create(&analog_cfg);
+        shs_add_analog_input_meta(analog_input, SHS_EP_LD2450_TARGET_COUNT, "Target count", 0.0f, 3.0f, 1.0f);
         esp_zb_cluster_list_add_analog_input_cluster(cl, analog_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
         esp_zb_endpoint_config_t ep_cfg = {
@@ -2786,6 +3267,7 @@ static void shs_zigbee_task(void *pvParameters) {
             .status_flags = 0,
         };
         esp_zb_attribute_list_t *binary_input = esp_zb_binary_input_cluster_create(&binary_cfg);
+        shs_add_binary_input_meta(binary_input, SHS_EP_LD2450_ZONE1, "Zone 1 occupancy");
         esp_zb_cluster_list_add_binary_input_cluster(cl, binary_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
         esp_zb_endpoint_config_t ep_cfg = {
@@ -2813,6 +3295,7 @@ static void shs_zigbee_task(void *pvParameters) {
             .status_flags = 0,
         };
         esp_zb_attribute_list_t *binary_input = esp_zb_binary_input_cluster_create(&binary_cfg);
+        shs_add_binary_input_meta(binary_input, SHS_EP_LD2450_ZONE2, "Zone 2 occupancy");
         esp_zb_cluster_list_add_binary_input_cluster(cl, binary_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
         esp_zb_endpoint_config_t ep_cfg = {
@@ -2840,6 +3323,7 @@ static void shs_zigbee_task(void *pvParameters) {
             .status_flags = 0,
         };
         esp_zb_attribute_list_t *binary_input = esp_zb_binary_input_cluster_create(&binary_cfg);
+        shs_add_binary_input_meta(binary_input, SHS_EP_LD2450_ZONE3, "Zone 3 occupancy");
         esp_zb_cluster_list_add_binary_input_cluster(cl, binary_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
         esp_zb_endpoint_config_t ep_cfg = {
@@ -2867,6 +3351,7 @@ static void shs_zigbee_task(void *pvParameters) {
             .status_flags = 0,
         };
         esp_zb_attribute_list_t *binary_input = esp_zb_binary_input_cluster_create(&binary_cfg);
+        shs_add_binary_input_meta(binary_input, SHS_EP_LD2450_ZONE4, "Zone 4 occupancy");
         esp_zb_cluster_list_add_binary_input_cluster(cl, binary_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
         esp_zb_endpoint_config_t ep_cfg = {
@@ -2894,6 +3379,7 @@ static void shs_zigbee_task(void *pvParameters) {
             .status_flags = 0,
         };
         esp_zb_attribute_list_t *binary_input = esp_zb_binary_input_cluster_create(&binary_cfg);
+        shs_add_binary_input_meta(binary_input, SHS_EP_LD2450_ZONE5, "Zone 5 occupancy");
         esp_zb_cluster_list_add_binary_input_cluster(cl, binary_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
         esp_zb_endpoint_config_t ep_cfg = {
@@ -2908,6 +3394,9 @@ static void shs_zigbee_task(void *pvParameters) {
 
     /* ========== EP8-16: LD2450 Position Data (genAnalogInput) - Only Active When Position Reporting Enabled ========== */
     /* Target 1: X, Y, Distance */
+    static const char *const shs_desc_x[3] = {"Target 1 X", "Target 2 X", "Target 3 X"};
+    static const char *const shs_desc_y[3] = {"Target 1 Y", "Target 2 Y", "Target 3 Y"};
+    static const char *const shs_desc_dist[3] = {"Target 1 distance", "Target 2 distance", "Target 3 distance"};
     for (int i = 0; i < 3; i++) {
         uint8_t ep_base = SHS_EP_LD2450_T1_X + (i * 3);  /* EP8, EP11, EP14 */
 
@@ -2923,6 +3412,7 @@ static void shs_zigbee_task(void *pvParameters) {
                 .status_flags = 0,
             };
             esp_zb_attribute_list_t *analog_input = esp_zb_analog_input_cluster_create(&analog_cfg);
+            shs_add_analog_input_meta(analog_input, ep_base, shs_desc_x[i], 0.0f, 6000.0f, 1.0f);
             esp_zb_cluster_list_add_analog_input_cluster(cl, analog_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
             esp_zb_endpoint_config_t ep_cfg = {
@@ -2947,6 +3437,7 @@ static void shs_zigbee_task(void *pvParameters) {
                 .status_flags = 0,
             };
             esp_zb_attribute_list_t *analog_input = esp_zb_analog_input_cluster_create(&analog_cfg);
+            shs_add_analog_input_meta(analog_input, ep_base + 1, shs_desc_y[i], 0.0f, 6000.0f, 1.0f);
             esp_zb_cluster_list_add_analog_input_cluster(cl, analog_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
             esp_zb_endpoint_config_t ep_cfg = {
@@ -2971,6 +3462,7 @@ static void shs_zigbee_task(void *pvParameters) {
                 .status_flags = 0,
             };
             esp_zb_attribute_list_t *analog_input = esp_zb_analog_input_cluster_create(&analog_cfg);
+            shs_add_analog_input_meta(analog_input, ep_base + 2, shs_desc_dist[i], 0.0f, 6000.0f, 1.0f);
             esp_zb_cluster_list_add_analog_input_cluster(cl, analog_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
             esp_zb_endpoint_config_t ep_cfg = {
@@ -2999,6 +3491,7 @@ static void shs_zigbee_task(void *pvParameters) {
             .status_flags = 0,
         };
         esp_zb_attribute_list_t *binary_input = esp_zb_binary_input_cluster_create(&binary_cfg);
+        shs_add_binary_input_meta(binary_input, SHS_EP_LD2412_MOVING, "Moving target");
         esp_zb_cluster_list_add_binary_input_cluster(cl, binary_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
         esp_zb_endpoint_config_t ep_cfg = {
@@ -3026,6 +3519,7 @@ static void shs_zigbee_task(void *pvParameters) {
             .status_flags = 0,
         };
         esp_zb_attribute_list_t *binary_input = esp_zb_binary_input_cluster_create(&binary_cfg);
+        shs_add_binary_input_meta(binary_input, SHS_EP_LD2412_STATIC, "Static target");
         esp_zb_cluster_list_add_binary_input_cluster(cl, binary_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
         esp_zb_endpoint_config_t ep_cfg = {
@@ -3053,6 +3547,7 @@ static void shs_zigbee_task(void *pvParameters) {
             .status_flags = 0,
         };
         esp_zb_attribute_list_t *analog_input = esp_zb_analog_input_cluster_create(&analog_cfg);
+        shs_add_analog_input_meta(analog_input, SHS_EP_ZONE1_TARGETS, "Zone 1 targets", 0.0f, 3.0f, 1.0f);
         esp_zb_cluster_list_add_analog_input_cluster(cl, analog_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
         esp_zb_endpoint_config_t ep_cfg = {
@@ -3080,6 +3575,7 @@ static void shs_zigbee_task(void *pvParameters) {
             .status_flags = 0,
         };
         esp_zb_attribute_list_t *analog_input = esp_zb_analog_input_cluster_create(&analog_cfg);
+        shs_add_analog_input_meta(analog_input, SHS_EP_ZONE2_TARGETS, "Zone 2 targets", 0.0f, 3.0f, 1.0f);
         esp_zb_cluster_list_add_analog_input_cluster(cl, analog_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
         esp_zb_endpoint_config_t ep_cfg = {
@@ -3107,6 +3603,7 @@ static void shs_zigbee_task(void *pvParameters) {
             .status_flags = 0,
         };
         esp_zb_attribute_list_t *analog_input = esp_zb_analog_input_cluster_create(&analog_cfg);
+        shs_add_analog_input_meta(analog_input, SHS_EP_ZONE3_TARGETS, "Zone 3 targets", 0.0f, 3.0f, 1.0f);
         esp_zb_cluster_list_add_analog_input_cluster(cl, analog_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
         esp_zb_endpoint_config_t ep_cfg = {
@@ -3134,6 +3631,7 @@ static void shs_zigbee_task(void *pvParameters) {
             .status_flags = 0,
         };
         esp_zb_attribute_list_t *analog_input = esp_zb_analog_input_cluster_create(&analog_cfg);
+        shs_add_analog_input_meta(analog_input, SHS_EP_ZONE4_TARGETS, "Zone 4 targets", 0.0f, 3.0f, 1.0f);
         esp_zb_cluster_list_add_analog_input_cluster(cl, analog_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
         esp_zb_endpoint_config_t ep_cfg = {
@@ -3161,6 +3659,7 @@ static void shs_zigbee_task(void *pvParameters) {
             .status_flags = 0,
         };
         esp_zb_attribute_list_t *analog_input = esp_zb_analog_input_cluster_create(&analog_cfg);
+        shs_add_analog_input_meta(analog_input, SHS_EP_ZONE5_TARGETS, "Zone 5 targets", 0.0f, 3.0f, 1.0f);
         esp_zb_cluster_list_add_analog_input_cluster(cl, analog_input, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
         esp_zb_endpoint_config_t ep_cfg = {
@@ -3315,6 +3814,9 @@ void app_main(void) {
         nvs_rc = nvs_flash_init();
     }
     ESP_ERROR_CHECK(nvs_rc);
+
+    /* After an OTA update, arm the rollback timer until the new image rejoins */
+    shs_ota_check_pending_verify();
 
     /* Load configuration from NVS */
     shs_cfg_load_from_nvs();
