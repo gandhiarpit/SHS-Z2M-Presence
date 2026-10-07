@@ -2603,6 +2603,7 @@ static void shs_ld2450_task(void *pvParameters) {
                 /* Read firmware version on first connection */
                 vTaskDelay(pdMS_TO_TICKS(500));  // Wait for sensor to stabilize
                 ld2450_read_firmware_version();
+                ld2450_ensure_multi_target();
             }
         } else if (was_connected) {
             ESP_LOGW(SHS_TAG, "LD2450 disconnected - will attempt recovery");

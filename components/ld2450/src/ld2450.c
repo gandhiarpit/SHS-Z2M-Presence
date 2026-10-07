@@ -881,6 +881,42 @@ esp_err_t ld2450_read_firmware_version(void) {
 }
 
 /**
+ * @brief Make sure the radar tracks up to 3 targets
+ *
+ * Single/multi-target mode is stored in the radar, not in this firmware. Fork
+ * firmware v1.1.0-v1.1.1 sent command 0x0080 on every zone change believing it
+ * set zones; on the LD2450 it means "single target tracking", so a radar that
+ * ran that firmware keeps reporting one target until told otherwise. Only acts
+ * on a confirmed single-target reply - an unreadable reply changes nothing.
+ */
+esp_err_t ld2450_ensure_multi_target(void) {
+    esp_err_t ret = enter_config_mode();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Cannot check tracking mode: config mode unavailable");
+        exit_config_mode();
+        return ret;
+    }
+
+    ret = send_command(LD2450_CMD_QUERY_TARGET_MODE, NULL, 0, true);
+    /* Payload: [0-1] ACK cmd, [2-3] status, [4] mode */
+    if (ret == ESP_OK && s_response_len >= 5) {
+        uint8_t mode = s_response_buffer[4];
+        ESP_LOGI(TAG, "Tracking mode: %s (0x%02X)",
+                 mode == 0x02 ? "multi-target" : mode == 0x01 ? "SINGLE-target" : "unknown", mode);
+        if (mode == 0x01) {
+            ret = send_command(LD2450_CMD_MULTI_TARGET, NULL, 0, true);
+            ESP_LOGW(TAG, "Radar was in single-target mode, switched to multi-target: %s",
+                     esp_err_to_name(ret));
+        }
+    } else {
+        ESP_LOGW(TAG, "Tracking mode query failed: %s", esp_err_to_name(ret));
+    }
+
+    exit_config_mode();
+    return ret;
+}
+
+/**
  * @brief Restart sensor
  */
 esp_err_t ld2450_restart(void) {
