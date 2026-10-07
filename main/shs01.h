@@ -84,7 +84,7 @@
  * SHS_BASIC_SW_BUILD_ID (tools/make_release.py checks this) and increase every release. */
 #define SHS_OTA_FILE_VERSION            0x02010000
 #define SHS_OTA_MANUFACTURER_CODE       0x131B      /* Espressif (esp-zigbee-sdk default) */
-#define SHS_OTA_IMAGE_TYPE              0x5302      /* LD2412 build; 0x5301 is the LD2410 build - never share, or OTA cross-flashes the radar */
+#define SHS_OTA_IMAGE_TYPE              0x5302      /* This fork, LD2412 build. 0x5301 is upstream (notownblues), 0x5303 the LD2410 build: distinct so no OTA index can cross-flash */
 #define SHS_OTA_HW_VERSION              0x0001
 #define SHS_OTA_MAX_DATA_SIZE           223
 #define SHS_OTA_ROLLBACK_CONFIRM_MS     (10 * 60 * 1000)  /* Roll back if not rejoined within 10 min of an OTA boot */
