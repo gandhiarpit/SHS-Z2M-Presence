@@ -801,11 +801,13 @@ static void shs_on_state_change(const ld2412_state_t *state) {
 #endif
 
     /* LD2450 cross-validation:
-     * If LD2450 sees 0 targets, ignore LD2412 detections - they're likely interference.
-     * The LD2450 is more accurate and doesn't suffer from the same noise issues.
-     * This effectively uses LD2450 as a "sanity check" for LD2412.
+     * The LD2412 can only START presence while the LD2450 sees a target, which
+     * keeps interference from triggering an empty room. Once occupied, the
+     * LD2412 holds it on its own: the LD2450 tracks motion and drops a person
+     * who sits still, so gating every frame cleared static presence exactly
+     * when it mattered.
      */
-    if (shs_ld2450_target_count == 0) {
+    if (shs_ld2450_target_count == 0 && !shs_occupancy_state) {
         raw_moving = false;
         raw_static = false;
     }
