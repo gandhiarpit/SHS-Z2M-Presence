@@ -1,19 +1,5 @@
 [
   {
-    "fileName": "SHS_Z2M_Presence_v1.4.1.ota",
-    "url": "https://github.com/gandhiarpit/SHS-Z2M-Presence/releases/download/v1.4.1/SHS_Z2M_Presence_v1.4.1.ota",
-    "fileVersion": 17039616,
-    "fileSize": 737598,
-    "manufacturerCode": 4891,
-    "imageType": 21251,
-    "sha512": "24dbbaa4ee349a7621505825325a85eaabbc1e800d4ec13dce9081fb825fb8740320dff424f02a4955570b25168c17f43144539ebfdaa8488dceac7106ebe168",
-    "otaHeaderString": "SHS-Z2M-Presence v1.4.1",
-    "modelId": "SHS-Z2M-Presence",
-    "manufacturerName": [
-      "SmartHomeScene"
-    ]
-  },
-  {
     "fileName": "SHS_Z2M_Presence_LD2412_v2.1.2.ota",
     "url": "https://github.com/gandhiarpit/SHS-Z2M-Presence/releases/download/v2.1.2/SHS_Z2M_Presence_LD2412_v2.1.2.ota",
     "fileVersion": 33620480,
@@ -23,6 +9,20 @@
     "sha512": "b4ed477ca73a784ce8bb41408b7dca4c24c52e72faa090b132d9ff10653060da1615b900d7901979809b4417f108c10da6fae096b5f96bb7947dc6e345f26c9e",
     "otaHeaderString": "SHS-Z2M-Presence-2412 v2.1.2",
     "modelId": "SHS-Z2M-Presence-2412",
+    "manufacturerName": [
+      "SmartHomeScene"
+    ]
+  },
+  {
+    "fileName": "SHS_Z2M_Presence_v1.4.2.ota",
+    "url": "https://github.com/gandhiarpit/SHS-Z2M-Presence/releases/download/v1.4.2/SHS_Z2M_Presence_v1.4.2.ota",
+    "fileVersion": 17039872,
+    "fileSize": 737614,
+    "manufacturerCode": 4891,
+    "imageType": 21251,
+    "sha512": "dd3b8e79984da0ab3ecb96d659597634b67ec8dbc2b1dbc0e9fa7efdbbb8972aee2239c9228ea60f23affe48cec143677c63c24c178032553a55dc43ee4a488a",
+    "otaHeaderString": "SHS-Z2M-Presence v1.4.2",
+    "modelId": "SHS-Z2M-Presence",
     "manufacturerName": [
       "SmartHomeScene"
     ]
