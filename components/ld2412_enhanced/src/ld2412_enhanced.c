@@ -11,6 +11,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include <string.h>
 
 static const char *TAG = "LD2412";
@@ -48,6 +49,12 @@ static ld2412_energy_callback_t s_energy_callback = NULL;
 static ld2412_gate_callback_t s_gate_callback = NULL;
 
 /* Command response handling */
+/* The Zigbee task (attribute writes) and the LD2412 task (ld2412_process)
+ * both use this UART. A config sequence holds the lock from enable_config()
+ * to end_config(), and ld2412_process() skips its read while it is held -
+ * otherwise the processing task can swallow the ACK and the command is
+ * dropped without an error. */
+static SemaphoreHandle_t s_uart_lock = NULL;
 static bool s_waiting_response = false;
 static uint16_t s_expected_cmd = 0;
 static uint8_t s_response_buffer[64];
@@ -643,6 +650,11 @@ static esp_err_t enable_config(void) {
     uint8_t data[] = {0x01, 0x00};  // 0x0001
     esp_err_t err;
 
+    if (s_uart_lock == NULL || xSemaphoreTake(s_uart_lock, pdMS_TO_TICKS(3000)) != pdTRUE) {
+        ESP_LOGE(TAG, "UART busy, config command skipped");
+        return ESP_ERR_TIMEOUT;
+    }
+
     /* Try up to 3 times with increasing delays */
     for (int attempt = 0; attempt < 3; attempt++) {
         /* Flush UART RX buffer to clear any pending data frames */
@@ -664,6 +676,8 @@ static esp_err_t enable_config(void) {
         ESP_LOGW(TAG, "Config mode attempt %d failed, retrying...", attempt + 1);
     }
 
+    ESP_LOGE(TAG, "Could not enter config mode: %s", esp_err_to_name(err));
+    xSemaphoreGive(s_uart_lock);
     return err;
 }
 
@@ -671,7 +685,9 @@ static esp_err_t enable_config(void) {
  * @brief End configuration mode
  */
 static esp_err_t end_config(void) {
-    return send_command_wait(LD2412_CMD_END_CONFIG, NULL, 0, 100);
+    esp_err_t err = send_command_wait(LD2412_CMD_END_CONFIG, NULL, 0, 100);
+    xSemaphoreGive(s_uart_lock);
+    return err;
 }
 
 /* ============================================================================
@@ -713,6 +729,11 @@ esp_err_t ld2412_init(void) {
     s_state.moving_cooldown_seconds = 5;  // Default 5 seconds
     s_state.occupancy_clear_delay = 0;
 
+    if (s_uart_lock == NULL) {
+        s_uart_lock = xSemaphoreCreateMutex();
+        if (s_uart_lock == NULL) return ESP_ERR_NO_MEM;
+    }
+
     // Initialize parser state
     reset_frame_parser();
     s_last_valid_frame_time = esp_timer_get_time() / 1000;  // Start watchdog timer
@@ -735,6 +756,9 @@ const ld2412_state_t* ld2412_get_state(void) {
 }
 
 void ld2412_process(void) {
+    /* A config command owns the UART; its own wait loop reads the replies */
+    if (s_uart_lock == NULL || xSemaphoreTake(s_uart_lock, 0) != pdTRUE) return;
+
     uint32_t now = esp_timer_get_time() / 1000;
 
     /* Check for frame collection timeout - prevents stuck state machine */
@@ -808,6 +832,8 @@ void ld2412_process(void) {
                  (unsigned long)s_uart_error_count,
                  (unsigned long)s_total_bytes_received);
     }
+
+    xSemaphoreGive(s_uart_lock);
 }
 
 esp_err_t ld2412_enable_engineering_mode(void) {
@@ -1089,6 +1115,7 @@ esp_err_t ld2412_restart(void) {
     }
 
     // Don't call end_config - sensor is restarting
+    xSemaphoreGive(s_uart_lock);
     return err;
 }
 
